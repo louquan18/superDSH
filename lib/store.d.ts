@@ -5,6 +5,15 @@ export declare const STORAGE_SPEC: any;
 export declare class Store {
     private readonly domain;
     private constructor();
+    /**
+     * P0：运行期版本标识。设好之后，`saveMeta()` 与 `appendAudit()` 会自动带上，
+     * 调用方（service / 各个写审计的地方）不需要关心。
+     */
+    private versionStamp;
+    setVersion(stamp: {
+        codeVersion: string;
+        configHash: string;
+    } | null): void;
     static open(ctx: any): Promise<Store>;
     close(): Promise<void>;
     private table;

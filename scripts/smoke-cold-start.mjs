@@ -146,6 +146,17 @@ async function main() {
     if (!health) problems.push(`snapshot.sources 缺少 ${kind}`)
     else if (health.available !== true) problems.push(`${kind} 不可用：${health.error ?? 'unknown'}`)
   }
+  // 6.5) P0 版本戳：真实进程的 /state 必须带上代码版本与配置指纹
+  //      （脱离 git 时允许降级成 pkg@x.y.z+unknown，但不能为空）
+  const version = state?.version
+  if (!version) problems.push('snapshot 缺少 version（P0 版本戳没生效）')
+  else {
+    if (!String(version.codeVersion ?? '').trim()) problems.push('version.codeVersion 为空')
+    if (!/^[0-9a-f]{12}$/.test(String(version.configHash ?? ''))) {
+      problems.push(`version.configHash 不是 12 位 hex：${version.configHash}`)
+    }
+  }
+
   const claudeSessions = (state?.sessions ?? []).filter((item) => item.source === 'claude')
   if (claudeSessions.length < 2) {
     problems.push(`claude 会话没扫到（含子会话应为 2 条，实际 ${claudeSessions.length}）`)

@@ -2207,3 +2207,29 @@ test('P0 回归：list 阶段抛错的来源被标不可用，其它来源照常
   assert.match(String(codex?.error), /list exploded/)
   assert.equal(snapshot.sessions.length, before, 'dsh 会话不受影响')
 })
+
+test('P0 版本戳：快照、审计、meta 三处带同一份 codeVersion / configHash', async () => {
+  const { harness } = await boot()
+  const snapshot = await harness.service.snapshot()
+
+  assert.ok(snapshot.version, '快照要带版本标识')
+  assert.equal(typeof snapshot.version!.codeVersion, 'string')
+  assert.ok(snapshot.version!.codeVersion.length > 0)
+  assert.match(snapshot.version!.configHash, /^[0-9a-f]{12}$/)
+  assert.ok((snapshot.version!.startedAt ?? 0) > 0)
+
+  // 审计：任何一条决策都要能回答「哪版代码、哪版配置」
+  const audit = await harness.service.store.appendAudit({ kind: 'command', action: 'version_probe' })
+  assert.equal(audit.codeVersion, snapshot.version!.codeVersion)
+  assert.equal(audit.configHash, snapshot.version!.configHash)
+
+  // meta：重启后仍能查到上一次跑的是哪版
+  const meta = await harness.service.store.getMeta()
+  assert.equal(meta.codeVersion, snapshot.version!.codeVersion)
+  assert.equal(meta.configHash, snapshot.version!.configHash)
+
+  // diagnostics 也要有（排查「为什么没拦」的第一步）
+  const diagnostics = harness.service.diagnostics()
+  assert.equal(diagnostics.version.codeVersion, snapshot.version!.codeVersion)
+  assert.equal(diagnostics.version.configHash, snapshot.version!.configHash)
+})

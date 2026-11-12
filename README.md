@@ -134,6 +134,8 @@ node scripts/verify-web.mjs http://127.0.0.1:3081 "<启动日志里的 token>"
 
 `POST /api/superagent/action {"action":"diagnostics"}` 会返回运行期实况：管家 sessionId、当前每个 root agent 的 preset/状态、**本插件是否真的给它装了门禁和 worker 工具**（`installed: true` 表示五个注册点全部成功、没有静默降级）、以及八张表的记录数。排查"为什么没拦"时先看这里。
 
+诊断、`snapshot()` 和**每一条审计**都带 `version`：`codeVersion`（`git describe --tags --always --dirty`；脱离 git 安装时降级为 `pkg@x.y.z+unknown`）与 `configHash`（有效配置的 sha256 前 12 位）。目的很具体：事后能回答「这条决策是哪版代码、哪版配置下做的」。面板右上角显示当前 `codeVersion`，悬停看完整信息。
+
 ## 多来源（二期 P1：Claude Code 只读）
 
 `SourceKind = dsh | claude | codex | remote`，`source` 字段贯穿 session/dispatch/blocker/audit 与面板；缺字段一律按 `dsh` 解释，**不迁移**旧数据。

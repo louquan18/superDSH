@@ -13,7 +13,7 @@
 
 | 阶段 | 内容 | 工期 | 版本 |
 |---|---|---|---|
-| **P0** | 版本戳贯穿（git 版本 + 配置指纹进审计与快照） | 0.5 天 | `v0.1.1` |
+| **P0** | 版本戳贯穿（git 版本 + 配置指纹进审计与快照） | 0.5 天 | `v0.1.1` ✅ 已完成 |
 | **P1** | 决策台账 + 准确率 + shadow 策略 | 2 天 | `v0.2.0` |
 | **P2** | Thread 生命周期（销账单位从 dispatch 改为 thread） | 3.5 天 | `v0.3.0` |
 
@@ -59,7 +59,7 @@
 
 ---
 
-## 3. P0 · 版本戳贯穿（0.5 人日，`v0.1.1`）
+## 3. P0 · 版本戳贯穿（0.5 人日，`v0.1.1`）— ✅ 已完成 2026-11-12
 
 ### 3.1 目标
 
@@ -101,13 +101,15 @@ export function configHash(cfg: Config): string {
 - **有超时**。`timeout: 1500`，防止 `.git` 异常（网络盘、损坏索引）阻塞启动。
 - **失败不抛**。降级成 `pkg@0.1.0+unknown`，绝不因为拿不到版本让插件起不来（对齐 I-15 的教训）。
 
-### 3.4 验收
+### 3.4 验收（已完成）
 
-- [ ] `POST /api/superagent/action {"action":"diagnostics"}` 返回 `version.codeVersion` 与 `configHash`
-- [ ] 新建任一条审计，其 `codeVersion`/`configHash` 与 diagnostics 一致
-- [ ] 改一行源码不提交 → `codeVersion` 变 `v0.1.0-1-gxxxx-dirty`
-- [ ] 从无 `.git` 的目录拷贝一份启动 → 降级为 `pkg@0.1.0+unknown`，插件正常工作
-- [ ] 261 测试全绿
+- [x] `diagnostics` 返回 `version.codeVersion` 与 `configHash` —— 集成测试断言
+- [x] 新建任一条审计，其 `codeVersion`/`configHash` 与 diagnostics 一致 —— 集成测试断言
+- [x] `meta` 也带版本（重启后能查上一次跑的是哪版）—— 集成测试断言
+- [x] 非 git 环境降级为 `pkg@x.y.z+unknown` 且不抛错 —— 单测断言降级串形状
+- [x] 真实 dsh 进程端到端：`smoke:cold-start` 新增断言，`/state` 必须带 version 且 `configHash` 是 12 位 hex（实测 `codeVersion = v0.1.0-1-g68e66f1-dirty`）
+- [x] 266 测试全绿（原 261 + 4 单测 + 1 集成）+ `check:client` + `check:notice`
+- [x] 面板右上角显示 `codeVersion`，悬停显示完整版本 + 配置指纹 + 启动时间
 
 ### 3.5 回滚
 

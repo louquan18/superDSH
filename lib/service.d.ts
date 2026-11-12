@@ -2,6 +2,7 @@ import { DshSource, type SourceSessionLite } from './source.js';
 import { SourceRegistry } from './sources/registry.js';
 import { type SourceCapabilities, type SourceKind } from './sources/types.js';
 import { Store } from './store.js';
+import { type VersionInfo } from './version.js';
 import { type SessionRuntime } from './status.js';
 import type { ButlerNoticePayload, Config, HardStatus, Project, RouteDecision, Snapshot } from './types.js';
 export declare const WORKER_PROMPT = "You are a worker managed by the SuperAgent butler. The butler is a read-only router; it does not do the work. Report your state at the start, at major milestones, before ending a turn, when blocked, and when you need a user decision, using butler_report_status. Keep the report short and factual.\n\nIf you are working on a task dispatched by the butler (marked \u3010\u7BA1\u5BB6\u6D3E\u53D1\u3011) and the project is in plan-review mode, do not edit files or run mutating commands before your plan for this task is approved. Call butler_submit_plan with a complete plan and a structured scope (paths/commands). Then end the turn and wait. The host enforces this: a mutating tool call without an approved plan is denied. Do not try to bypass a denial; submit a plan or ask the butler.\n\nIf this project is in gate-confirm mode, proceed directly. High-risk or out-of-plan operations will be held for the user; low-risk operations may be approved automatically.";
@@ -12,6 +13,8 @@ export declare class SuperagentService {
     readonly source: DshSource;
     /** 多来源注册表；P0 只注册 dsh，P1 起按配置注册 claude。 */
     readonly sources: SourceRegistry;
+    /** P0 版本戳：本次运行的代码版本与配置指纹。 */
+    readonly version: VersionInfo;
     private claude?;
     private codex?;
     private meta;

@@ -116,6 +116,16 @@ type Table<T> = {
 export class Store {
   private constructor(private readonly domain: any) {}
 
+  /**
+   * P0：运行期版本标识。设好之后，`saveMeta()` 与 `appendAudit()` 会自动带上，
+   * 调用方（service / 各个写审计的地方）不需要关心。
+   */
+  private versionStamp: { codeVersion: string; configHash: string } | null = null
+
+  setVersion(stamp: { codeVersion: string; configHash: string } | null): void {
+    this.versionStamp = stamp
+  }
+
   static async open(ctx: any): Promise<Store> {
     const domain = await ctx.storageDomain.open(STORAGE_SPEC)
     return new Store(domain)
@@ -152,6 +162,10 @@ export class Store {
 
   async saveMeta(meta: Meta): Promise<void> {
     meta.updatedAt = now()
+    if (this.versionStamp) {
+      meta.codeVersion = this.versionStamp.codeVersion
+      meta.configHash = this.versionStamp.configHash
+    }
     await this.table<Meta>('meta').put('state', meta)
   }
 
@@ -305,6 +319,11 @@ export class Store {
       at: entry.at ?? now(),
       ...entry,
     } as AuditEntry
+    // 版本戳是单一事实来源：调用方写了也以 Store 的为准，保证同一次运行内一致。
+    if (this.versionStamp) {
+      record.codeVersion = this.versionStamp.codeVersion
+      record.configHash = this.versionStamp.configHash
+    }
     await this.table<AuditEntry>('audit').put(record.id, record)
     return record
   }

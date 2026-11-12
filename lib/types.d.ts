@@ -37,6 +37,12 @@ export interface Meta {
     lastReminderAt: number | null;
     createdAt: number;
     updatedAt: number;
+    /** 写这份 meta 时的代码版本（`git describe`，取不到则是 `pkg@x.y.z+unknown`）。 */
+    codeVersion?: string;
+    /** 有效配置的指纹，见 `version.ts`。 */
+    configHash?: string;
+    /** 进程启动时间。 */
+    startedAt?: number;
 }
 export interface Project {
     key: string;
@@ -219,6 +225,12 @@ export interface AuditEntry {
     callId?: string;
     argsSummary?: string;
     note?: string;
+    /**
+     * 产生这条决策的代码版本与配置指纹（P0 版本戳）。
+     * 由 `Store.setVersion()` 统一注入，调用方不传。
+     */
+    codeVersion?: string;
+    configHash?: string;
 }
 export interface SessionView {
     sessionId: string;
@@ -245,6 +257,15 @@ export interface SessionView {
 }
 export interface Snapshot {
     generatedAt: number;
+    /**
+     * 运行期版本标识（P0）：面板上显示、排查「哪版代码 + 哪版配置」用。
+     * 老客户端不认这个字段，缺省也不影响任何行为。
+     */
+    version?: {
+        codeVersion: string;
+        configHash: string;
+        startedAt: number;
+    };
     butler: {
         sessionId: string | null;
         title: string;

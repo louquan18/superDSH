@@ -13,6 +13,7 @@ import {
   type SourceKind,
 } from './sources/types.js'
 import { Store } from './store.js'
+import { resolveVersion, type VersionInfo } from './version.js'
 import { applySessionEvent, createRuntime as newRuntime, deriveHardStatus, foldSession, parseReportStatus, type SessionRuntime } from './status.js'
 import {
   ANSWERABLE_KINDS,
@@ -118,6 +119,8 @@ export class SuperagentService {
   readonly source: DshSource
   /** 多来源注册表；P0 只注册 dsh，P1 起按配置注册 claude。 */
   readonly sources: SourceRegistry
+  /** P0 版本戳：本次运行的代码版本与配置指纹。 */
+  readonly version: VersionInfo
   private claude?: ClaudeSource
   private codex?: CodexSource
   private meta!: Meta
@@ -181,6 +184,8 @@ export class SuperagentService {
     this.ctx = options.ctx
     this.config = options.config
     this.store = options.store
+    this.version = resolveVersion(this.config)
+    this.store.setVersion(this.version)
     this.source = new DshSource({ ctx: options.ctx })
     this.sources = new SourceRegistry()
     this.sources.register(this.source)
@@ -228,6 +233,8 @@ export class SuperagentService {
 
   private async init(): Promise<void> {
     this.meta = await this.store.getMeta()
+    this.meta.startedAt = this.version.startedAt
+    await this.store.saveMeta(this.meta)
     this.butlerId = this.meta.butlerSessionId
     this.registerEvents()
     this.installExistingAgents()
@@ -3073,6 +3080,7 @@ export class SuperagentService {
       roots = []
     }
     return {
+      version: this.version,
       butlerSessionId: this.butlerId,
       agents: roots.map((agent: any) => ({
         id: String(agent?.id ?? ''),
@@ -3215,6 +3223,7 @@ export class SuperagentService {
     this.lastSnapshotAt = now()
     return {
       generatedAt: now(),
+      version: this.version,
       butler: {
         sessionId: this.butlerId,
         title: this.config.butler.title,

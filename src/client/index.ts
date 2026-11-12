@@ -970,6 +970,10 @@
       ? (snapshot.plans ?? []).filter((plan: any) => plan.status === 'pending_review').length
       : 0
     const butlerId = snapshot?.butler?.sessionId
+    // P0 版本戳：服务端带上才显示；老服务端没有这个字段就不渲染
+    const version = snapshot?.version as
+      | { codeVersion?: string; configHash?: string; startedAt?: number }
+      | undefined
 
     function counts(id: string): string | null {
       if (id === 'overview') return openBlockers > 0 ? String(openBlockers) : null
@@ -999,9 +1003,15 @@
         h('h2', { className: 'sab-title' }, 'SuperAgent 管家'),
         h(
           'span',
-          { className: 'sab-meta' },
+          {
+            className: 'sab-meta',
+            // P0 版本戳：鼠标悬停能看到完整 codeVersion + configHash，一眼定位「哪版代码/哪版配置」
+            title: version
+              ? `代码版本 ${version.codeVersion}\n配置指纹 ${version.configHash}\n启动于 ${fmtTime(version.startedAt)}`
+              : undefined,
+          },
           snapshot
-            ? `管家 ${STATUS_LABEL[snapshot.butler?.status] ?? snapshot.butler?.status ?? '未知'} · 同步 ${fmtTime(snapshot.generatedAt)}`
+            ? `管家 ${STATUS_LABEL[snapshot.butler?.status] ?? snapshot.butler?.status ?? '未知'} · 同步 ${fmtTime(snapshot.generatedAt)}${version ? ` · ${version.codeVersion}` : ''}`
             : state.error
               ? '连接失败'
               : '加载中…',
