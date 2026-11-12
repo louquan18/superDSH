@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="SuperAgent 管家">
+  <rect x="4" y="4" width="56" height="56" rx="14" fill="#1f3a5f"/>
+  <rect x="14" y="16" width="36" height="28" rx="9" fill="#f2f7ff"/>
+  <rect x="19" y="23" width="9" height="7" rx="3.5" fill="#1f3a5f"/>
+  <rect x="36" y="23" width="9" height="7" rx="3.5" fill="#1f3a5f"/>
+  <circle cx="23.5" cy="26.5" r="1.6" fill="#8fd3ff"/>
+  <circle cx="40.5" cy="26.5" r="1.6" fill="#8fd3ff"/>
+  <rect x="26" y="35" width="12" height="3" rx="1.5" fill="#1f3a5f"/>
+  <rect x="29" y="9" width="6" height="7" rx="3" fill="#8fd3ff"/>
+  <circle cx="32" cy="8" r="2.5" fill="#f2f7ff"/>
+  <path d="M24 47h16v9H24z" fill="#f2f7ff"/>
+  <path d="M32 48l7 4-7 4-7-4z" fill="#e05a5a"/>
+</svg>

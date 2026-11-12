@@ -1,0 +1,13 @@
+# 依赖与构建产物
+node_modules/
+test-dist/
+.verify/
+
+# 系统杂项
+.DS_Store
+*.log
+
+# 本地临时文件
+*.local.yml
+.env
+.env.*

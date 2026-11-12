@@ -1,0 +1,52 @@
+import type { Approval, AuditEntry, Blocker, Dispatch, ManagedSession, Meta, Plan, ProgressNoticeRecord, Project } from './types.js';
+/** 判断一个外部来源的会话 id 能不能安全落库。 */
+export declare function isSafeRecordKey(key: string): boolean;
+export declare const STORAGE_SPEC: any;
+export declare class Store {
+    private readonly domain;
+    private constructor();
+    static open(ctx: any): Promise<Store>;
+    close(): Promise<void>;
+    private table;
+    private list;
+    getMeta(): Promise<Meta>;
+    saveMeta(meta: Meta): Promise<void>;
+    /**
+     * 进度通知的持久化队列。
+     *
+     * 存在 `meta` 表的 `notices` 键下（而不是新增表）：新增表要动 STORAGE_SPEC 的 version，
+     * 而 version 不匹配会让已有用户的 domain 直接打不开（version-mismatch 是 fail-loud 的），
+     * 这里用同一张表的不同 key 就能持久化，零迁移风险。
+     */
+    listProgressNotices(): ProgressNoticeRecord[];
+    saveProgressNotices(items: ProgressNoticeRecord[]): Promise<void>;
+    listProjects(): Project[];
+    getProject(key: string): Project | undefined;
+    putProject(project: Project): Promise<void>;
+    listSessions(): ManagedSession[];
+    getSession(sessionId: string): ManagedSession | undefined;
+    putSession(session: ManagedSession): Promise<void>;
+    listDispatches(): Dispatch[];
+    getDispatch(id: string): Dispatch | undefined;
+    putDispatch(dispatch: Dispatch): Promise<void>;
+    findDispatchByRequestId(requestId: string): Dispatch | undefined;
+    currentDispatch(sessionId: string): Dispatch | undefined;
+    /** 这个 session 上最近的一条派发，不管状态（提交方案时用来兜底判定）。 */
+    latestDispatch(sessionId: string): Dispatch | undefined;
+    listPlans(): Plan[];
+    getPlan(id: string): Plan | undefined;
+    putPlan(plan: Plan): Promise<void>;
+    pendingPlan(sessionId: string): Plan | undefined;
+    approvedPlan(dispatchId: string): Plan | undefined;
+    listBlockers(): Blocker[];
+    getBlocker(id: string): Blocker | undefined;
+    putBlocker(blocker: Blocker): Promise<void>;
+    findOpenBlocker(sessionId: string, signature: string): Blocker | undefined;
+    listApprovals(): Approval[];
+    getApproval(id: string): Approval | undefined;
+    putApproval(approval: Approval): Promise<void>;
+    listAudit(): AuditEntry[];
+    appendAudit(entry: Omit<AuditEntry, 'id' | 'at'> & {
+        at?: number;
+    }): Promise<AuditEntry>;
+}

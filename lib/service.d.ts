@@ -1,0 +1,268 @@
+import { DshSource, type SourceSessionLite } from './source.js';
+import { SourceRegistry } from './sources/registry.js';
+import { type SourceCapabilities, type SourceKind } from './sources/types.js';
+import { Store } from './store.js';
+import { type SessionRuntime } from './status.js';
+import type { ButlerNoticePayload, Config, HardStatus, Project, RouteDecision, Snapshot } from './types.js';
+export declare const WORKER_PROMPT = "You are a worker managed by the SuperAgent butler. The butler is a read-only router; it does not do the work. Report your state at the start, at major milestones, before ending a turn, when blocked, and when you need a user decision, using butler_report_status. Keep the report short and factual.\n\nIf you are working on a task dispatched by the butler (marked \u3010\u7BA1\u5BB6\u6D3E\u53D1\u3011) and the project is in plan-review mode, do not edit files or run mutating commands before your plan for this task is approved. Call butler_submit_plan with a complete plan and a structured scope (paths/commands). Then end the turn and wait. The host enforces this: a mutating tool call without an approved plan is denied. Do not try to bypass a denial; submit a plan or ask the butler.\n\nIf this project is in gate-confirm mode, proceed directly. High-risk or out-of-plan operations will be held for the user; low-risk operations may be approved automatically.";
+export declare class SuperagentService {
+    readonly ctx: any;
+    readonly config: Config;
+    readonly store: Store;
+    readonly source: DshSource;
+    /** 多来源注册表；P0 只注册 dsh，P1 起按配置注册 claude。 */
+    readonly sources: SourceRegistry;
+    private claude?;
+    private codex?;
+    private meta;
+    private butlerId;
+    private runtimes;
+    private runtimeLoadedAt;
+    private installed;
+    private intents;
+    private approvalWaiters;
+    private questionWaiters;
+    private nativePlanQuestions;
+    /** 管家不在线时暂存的提醒，按管家 sessionId 分；`*` 是还没有任何管家时的公共队列。 */
+    private pendingButlerNotices;
+    private hub;
+    private timers;
+    private evaluateTimers;
+    private emitTimer;
+    private disposed;
+    private sessionsCache;
+    private lastSnapshotAt;
+    private progressTimers;
+    private progressPending;
+    private progressTarget;
+    private progressLastAt;
+    private progressKeys;
+    private planStartNotified;
+    /** 每条 dispatch 已唤醒管家的次数（与落盘的 woke 签名一起构成有界唤醒）。 */
+    private wakeCounts;
+    /** 全局上一次唤醒时间，用于 minGapMs 节流。 */
+    private lastWakeAt;
+    private bashReviewer;
+    /** 本进程内看到的 `agent-preset/selected`：会话在第一轮前切换 preset 时，header 不会更新。 */
+    private selectedPresets;
+    /** 每个来源的健康状态：来宾源坏掉只影响它自己，核心永远可用。 */
+    private sourceHealth;
+    private constructor();
+    static create(ctx: any, rawConfig: any): Promise<SuperagentService>;
+    private init;
+    dispose(): void;
+    private registerEvents;
+    private installExistingAgents;
+    private handleAgentCreated;
+    private handleAgentStatus;
+    private handleSessionEvent;
+    private createRuntime;
+    private scheduleEvaluate;
+    ensureRuntime(id: string, force?: boolean): Promise<SessionRuntime>;
+    private liveInfo;
+    hardStatusFor(id: string): HardStatus;
+    private agentOf;
+    private isButlerAgent;
+    /**
+     * 会话当前的 preset。先建普通会话、第一轮前再切到管家时，session header 仍是旧 preset，
+     * 所以以 preset 注册表记录的最新选择为准，读不到再退回 header。
+     */
+    private presetOf;
+    /** 会话切换 preset：切到管家就卸掉 worker 注入并当管家；切走就按 worker 安装。 */
+    private handlePresetSelected;
+    private isRootAgent;
+    private installWorker;
+    private currentProjectForSession;
+    private defaultCwd;
+    private workspaceList;
+    ensureProjectForCwd(cwd: string): Project;
+    listSessions(force?: boolean): Promise<SourceSessionLite[]>;
+    /** 外部来源有变化：清缓存并让面板刷新（不出提醒，只更新列表）。 */
+    invalidateSources(): void;
+    /**
+     * 注册一个来宾来源（claude / codex）。
+     *
+     * 构造、`start()`、首次 `list()` 都可能因为外部数据格式/权限出问题；任何一步失败都只把
+     * 这个来源标成不可用并记下原因，**不允许冒泡到 init()** —— 否则 `provide('superagent')`
+     * 不会执行，管家 preset 挂不上，整个管家的工具全没了（2026-11-09 的 P0 就是这么炸的）。
+     */
+    private registerGuestSource;
+    /** 来源健康状态（快照里给面板看，不静默）。 */
+    sourceStatus(): Array<{
+        kind: SourceKind;
+        enabled: boolean;
+        available: boolean;
+        error?: string;
+        at: number;
+    }>;
+    private markSourceHealth;
+    /** 某个会话属于哪个来源；缺省 dsh（旧记录兼容）。 */
+    sourceKindOf(sessionId: string): SourceKind;
+    /** 某个会话所属来源的能力表。 */
+    capabilitiesOf(sessionId: string): SourceCapabilities;
+    ensureButler(): Promise<string>;
+    get butlerSessionId(): string | null;
+    isButlerSessionId(id: string): boolean;
+    /**
+     * 管家判定：既认本服务创建的那个管家会话，也认任何以 superagent-butler 预设启动的会话。
+     * butler_* 工具与只读护栏都用这一处，避免两处判定不一致。
+     */
+    isButlerAgentSession(agent: any): boolean;
+    /**
+     * 列表行的管家判定，依次看：本进程看到的 preset 切换、live agent 的当前 preset、
+     * 已登记的管家标记（重启后冷 session 靠它）、session header。
+     */
+    private isButlerSessionRow;
+    noteReport(agent: any, args: any): Promise<any>;
+    sendToButler(text: string): Promise<{
+        sessionId: string;
+        accepted: boolean;
+    }>;
+    /** 所有已知的管家会话：默认管家 + 以管家 preset 运行或登记过的会话。 */
+    private butlerSessionIds;
+    /**
+     * 给管家发提醒（inject，不唤醒）。`butlerSessionId` 是任务的派发者：只发给它；
+     * 没有派发者、或派发者已不存在，就广播给所有管家。
+     *
+     * 传字符串时行为与旧版一致（纯文本提醒）；传 payload 时可以带上结构化 source，
+     * 客户端据此把这条消息渲染成一张可点按钮的卡片。
+     */
+    injectButlerNotice(payload: ButlerNoticePayload | string, butlerSessionId?: string): Promise<void>;
+    private queueButlerNotice;
+    private injectMessage;
+    private flushButlerNotices;
+    /** §6.4：只对管家派发的任务推进度，手动 session 只更新面板。 */
+    private noteProgress;
+    private completeDispatch;
+    private noteTurnEnd;
+    /**
+     * 同一 session 的进度提醒 60 秒合并一次，避免刷屏。
+     *
+     * `urgent` 用于「任务完成 / 失败」这类关键事件：不等合并，立刻发出去。
+     */
+    private queueProgress;
+    /** 造一条进度/里程碑提醒（无阻塞动作，最多带一个「打开会话」）。 */
+    private progressNotice;
+    private flushProgress;
+    /**
+     * worker 上报后：把这次上报算成「有进展」，并把 done 签名落进持久化游标，
+     * 让扫描路径（evaluateProgress）不会把同一批里程碑再报一遍。
+     */
+    private markReported;
+    /**
+     * 扫描态进度检测（A1 里程碑 / A2 阶段结束 / A3 卡点消失 / B watchdog）。
+     *
+     * progress 是通知：不进 blocker、不进待办条、不需要用户点按钮。
+     * 只对管家派发的任务推送（§6.4）；手动 session 的软状态变化仍然只刷新面板。
+     */
+    private evaluateProgress;
+    /**
+     * 快照里可见的进度通知：只留 open 且没过期的，并借这次读把过期项标成 expired 落盘。
+     *
+     * 与 `blockerNotices` 完全分开：这里绝不返回 blocker，也绝不进待办条。
+     */
+    private visibleProgressNotices;
+    /** 把这一批进度事件写进持久化队列（快照 progressNotices 的来源）。 */
+    private recordProgressNotices;
+    /**
+     * B-1 §5：有界唤醒管家。
+     *
+     * 有界性论证见 `decideWake`：类型闸 + 签名闸 + 每 dispatch 配额 + 全局节流 + 管家忙时不唤醒。
+     * 额外保证：**先落盘 woke 签名与计数，再发 prompt**——即使 prompt 失败也不会重试成二次唤醒。
+     */
+    private maybeWakeButler;
+    private evaluateSession;
+    private syncBlockers;
+    private maybeRemind;
+    private intentFor;
+    private riskContext;
+    /**
+     * §4.4：派发时与当前都是计划审查，这个 dispatch 才要求计划。
+     * 项目取 dispatch 自己的 workspaceKey：新开的 session 还没进 store，不能按 session 反查。
+     */
+    private planRequired;
+    /** §7.3：没有进行中的管家派发 = 手动 session，审批完全交给原生流程。 */
+    private hasActiveDispatch;
+    private classify;
+    /**
+     * 规则判不了的 bash 交给管家模型看一眼：没风险就放行并写审计；有风险或审查失败返回 false，
+     * 由调用方按原流程拒绝 / 转用户。只在管家派发的任务里调用。
+     */
+    private reviewBash;
+    /**
+     * `job_kill` 的归属判定：只有「本会话启动的 job」免审批。
+     *
+     * 宿主 `ctx.jobs.get(id, caller)` 自带 owner 围栏——别人的或不存在 job 会抛错，
+     * 所以这里不需要自己维护 job→session 表。拿不到 job registry 时返回否定结论：
+     * 读不到归属就要求审批，绝不把「未知」当成「属于本会话」。
+     */
+    private jobKillVerdict;
+    private gate;
+    private answerApproval;
+    private holdApproval;
+    decideApproval(approvalId: string, decision: 'allow' | 'deny', by?: 'user' | 'butler-chat', note?: string): Promise<{
+        ok: boolean;
+        message: string;
+    }>;
+    private finishApproval;
+    private answerQuestion;
+    answerQuestionByCall(callId: string, answer: any, by?: 'user' | 'butler-chat'): Promise<{
+        ok: boolean;
+        message: string;
+    }>;
+    private resolveAgentFor;
+    private resolveBlockersBy;
+    submitPlan(agent: any, args: any): Promise<any>;
+    /**
+     * R2：不需要审查的方案也要落盘。
+     *
+     * 之前 not_required 直接返回，方案正文只存在于工具参数里——工具调用一过就没了。
+     * 现在写进 plans 表（status=skipped），并给派发方发一条带 planId 的通知。
+     */
+    private recordSkippedPlan;
+    reviewPlan(planId: string, decision: 'approve' | 'changes' | 'reject', feedback: string | undefined, by?: 'user' | 'butler-chat'): Promise<{
+        ok: boolean;
+        message: string;
+    }>;
+    setMode(projectKey: string, mode: 'plan_review' | 'gate_confirm'): Promise<any>;
+    dispatchCandidates(text: string, workspaceKey?: string, cwd?: string): Promise<any>;
+    private resolveProjectForText;
+    dispatchExecute(decision: RouteDecision, text: string, fromButlerSessionId?: string, watchdog?: any): Promise<any>;
+    private startDispatch;
+    sendToSession(sessionId: string, text: string): Promise<void>;
+    /**
+     * 设计 §4.2 的「用户标记完成」：把一条进行中的派发收尾。
+     *
+     * 只允许 accepted/delivered；结束时同步做四件事——写审计、关掉这条派发的待审计划、
+     * 解除计划门禁（门禁只看 currentDispatch，状态一变就失效）、失败时告诉 worker 别干了。
+     */
+    markDispatch(dispatchId: string, outcome: string, note?: string, by?: 'user' | 'butler-chat' | 'butler-auto' | 'system'): Promise<any>;
+    reassign(dispatchId: string, targetSessionId: string): Promise<any>;
+    /**
+     * 把一条文本转发给 worker 会话，并如实返回有没有送到。
+     *
+     * `sendToSession` 是 best-effort（吞掉错误），答复类动作不能静默失败——用户点了「回答」
+     * 却什么也没发生，比不给按钮更糟。
+     */
+    private forwardToSession;
+    /**
+     * 决策被用户回答后，从已存的软状态里摘掉它。
+     *
+     * 否则下一次扫描会按同一条 `decisions` 重新生成一个一模一样的卡点，
+     * 用户会看到「刚答完又冒出来」。
+     */
+    private consumeDecision;
+    resolveBlocker(blockerId: string, action: 'approve' | 'reject' | 'answer' | 'dismiss' | 'retry' | 'resolve', text?: string, by?: 'user' | 'butler-chat'): Promise<any>;
+    queuedCount(sessionId: string): number;
+    openBlockerKinds(sessionId: string): any[];
+    /** 运行期自检：面板/CLI 用来确认门禁和 worker 工具真的挂到了真实 agent 上。 */
+    diagnostics(): any;
+    snapshot(): Promise<Snapshot>;
+    handleAction(action: string, payload?: any): Promise<any>;
+    subscribe(listener: () => void): () => void;
+    private queueEmit;
+    private emit;
+    private startTimers;
+    private scan;
+    private recover;
+}

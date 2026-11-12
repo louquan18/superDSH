@@ -1,0 +1,231 @@
+# SuperAgent 管家（@local/dsh-superagent-butler）
+
+本机 dsh session 的**只读管家**：帮你盯着所有 session 的进度和卡点、审查 worker 交上来的计划、派活、代批低风险操作，所有高风险动作都转回给你。
+
+设计规格见 [`../docs/dsh-superagent-butler-design.md`](../docs/dsh-superagent-butler-design.md)（下称"设计"）。本文件只写**怎么用、怎么验证、哪些还没验证**。
+
+## 一期做了什么
+
+| 能力 | 实现位置 | 设计 |
+|---|---|---|
+| 只读管家 session（只能 read/glob/grep，不能写、不能执行） | `src/butler/index.ts` + `cordis.patch.yml` 的 `preset-superagent-butler` | §3、§12.3 |
+| 十个管家工具：查状态、看收件箱、读 session、派活、发消息、改派、收尾派发、处理卡点、切模式、查审计 | `src/butler-tools.ts` | §12.2 |
+| 两个 worker 工具：上报状态、交计划 | `src/worker-tools.ts` | §12.4 |
+| 硬门禁 + 计划审查 + 审批代批 | `src/service.ts`（`gate` / `answerApproval`）、`src/risk.ts`、`src/plans.ts` | §7 |
+| 卡点检测（审批/提问/待审计划/重复失败/打转/中断/待决策） | `src/blockers.ts`、`src/status.ts` | §6.1 |
+| 卡点提醒与进度提醒（`【SuperAgent 提醒】`/`【SuperAgent 进度】`，注入不唤醒；source 带结构化 `notice`，客户端渲染成带按钮的卡片） | `src/service.ts`（`maybeRemind` / `queueProgress`）、`src/blockers.ts`（`buildBlockerNotice`） | §6.3、§6.4 |
+| 会话路由候选与 Host 校验 | `src/router.ts` | §5 |
+| 持久化（projects/sessions/dispatches/plans/blockers/approvals/audit 八张表） | `src/store.ts` | §9 |
+| 重启恢复（保留卡点/计划，补投未投递 dispatch） | `src/service.ts`（`recover`） | §6.3 |
+| 三条认证 HTTP 路由（快照 / SSE / 动作） | `src/host/routes.ts` | §8.4 |
+| `/superagent` 命令（status/inbox/mode/dispatch/butler/refresh/help） | `src/host/command.ts` | §8.5 |
+| 对话内可交互提醒（抢注带 `superagent-notice` source 的消息行 + 输入框上方「待处理」条 + 按钮直接打 `/api/superagent/action`） | `src/client/index.ts`（`superagent-notice` Definition、`NoticeRow`、`NoticeDock`） | §8.6 |
+| Web 面板（**只读**：概览 / 日志 / 明细，没有任何改变状态的动作） | `src/client/index.ts` | §8 |
+| 原生 session 行的卡点徽标与软状态 | `src/client/index.ts`（`sidebar.session.row.*`） | §8.3 |
+
+门禁矩阵（`src/service.ts` 的 `gate`）：
+
+| 项目模式 | 有进行中的管家 dispatch | 风险 | 结果 |
+|---|---|---|---|
+| `plan_review` | 是 | 计划外 / 高危 / 未知 | 原生审批 → 你 |
+| `plan_review` | 是 | 计划内 | 自动放行 |
+| `plan_review` | 是 | 写操作但**还没批计划** | 直接 deny（`先交计划`） |
+| `gate_confirm` | 是 | 低风险白名单 | 自动代批并写审计 |
+| `gate_confirm` | 是 | 其他 | 原生审批 → 你 |
+| 任意 | 否（手动 session） | 任意 | 插件不介入，审批走 dsh 原生流程 |
+
+申请 `sandbox_permissions` 升级的调用一律按高危处理，不会被代批。
+
+**bash 管家审查**（`src/bash-review.ts`，配置 `bashReview.enabled`，默认开）：管家派发的任务里，规则判不了的 bash 先交给 worker 当前的模型审一次，**只有真正危险的才转你**。
+- 计划审查、计划还没批准：只读命令放行，其余拒绝并要求先交计划（不打扰你）。
+- 其余情况（卡点确认，或计划已批准后的计划外命令）：普通开发操作都放行，包括管道、heredoc、脚本改项目内文件、读项目外的普通文件、清理 `/tmp` 和构建产物。只有能说出具体危险的才转你：删除不是 worker 创建的源码/数据、推远程/发布/上传、下载并执行、读写凭证、提权、混淆执行等。
+- `rm`、`curl`、`deploy` 这类关键词只作为提示交给模型核对，不再直接转你（`grep deploy` 不会被拦）。sandbox 升级不送审，始终转你。
+- 转给你的审批写明原因：模型判定危险时是「危险原因：<具体操作、对象、后果>」；审查没跑成（超时、没有模型路由、两次输出都不合协议）时写「管家没能完成审查（原因），请你判断」。审批卡点的标题带上命令本身。
+- 审计动作：`bash_review_allow` / `bash_review_deny` / `bash_review_failed`。代价：每条送审命令多一次模型请求，同一命令的结论在进程内缓存，失败不缓存。
+
+计划待审或计划审查下还没批准计划时，worker 上报「done 非空、next 为空」不会把 dispatch 判为完成。
+
+## 安装到 profile
+
+```bash
+# 装进现有的 web profile（写 ~/.dsh，需要该目录的写权限）
+# 注意 -w：profile 目录自带 pnpm-workspace.yaml，不加会被 pnpm 当成 workspace root 拒绝
+dsh plugin --profile web add -w link:/Users/quanlou/Documents/deepseek-harness/default-workspace/dsh-superagent-butler
+
+# 重启 dsh web 后生效（插件在启动时组装，热装不会进已在跑的进程）
+dsh web
+```
+
+安装会同时做两件事：把包加进 `~/.dsh/profiles/web/package.json` 的 `dependencies`，并把 `@local/dsh-superagent-butler` 追加进 `dsh.profile.bundles`（bundle patch 由插件自己的 `cordis.patch.yml` 提供）。
+
+bundle patch 会插入两项：`superagent-butler`（Host 服务 + 面板）和 `preset-superagent-butler`（只读管家 preset，含 `tool-fs` 只读配置与 `tool-fs-search`）。
+
+卸载：`dsh plugin --profile web remove -w @local/dsh-superagent-butler`（并把 bundles 里那一条删掉）。
+
+## 用起来
+
+1. 侧栏出现「管家」图标 → 点开面板 → 「创建管家会话」；之后所有事都在和它的对话里说，例如「让 worker 把 util 的 isInside bug 修了」——管家自己挑 session 或新开一个。
+2. 管家派活后，worker 的写操作会被门禁拦住，先要求交计划；对话里会出现一张带 [批准] / [提修改意见] / [驳回] 的提醒卡片，点一下就行。
+3. 卡点、进度提醒都会以**带按钮的消息**出现在管家对话里：审批给 [允许一次] [拒绝] [忽略]，卡住给 [重试] [忽略]，有在跑的派发还会多 [标记完成] [放弃任务]。点完就地变「✓ 已处理」，不跳页、不用回面板。
+4. 管家 idle 时提醒可能还没落进对话（`agent.inject` 的机制限制），这时管家会话输入框上方会出现「管家待处理 N 条」，展开还是同一套卡片。
+5. 面板（侧栏「管家」）现在是**只读**的：概览（计数 / 会话 / 项目 / 最近日志 / 最近已处理）、日志（审计表）、明细（卡点 / 计划 / 派发 / 项目模式），只保留跳转和刷新。
+6. 可以开多个管家（新建 session 时选「SuperAgent 管家」preset；先建普通会话、发第一条消息前再切到管家 preset 也可以，插件会卸掉 worker 注入）。每个管家派出的任务，进度和卡点只提醒它自己；手动 session 的卡点和重启汇总会提醒所有管家。离线的管家下次打开时补一条汇总。
+
+## 开发与验证
+
+```bash
+cd dsh-superagent-butler
+npm run build          # Host + Client 编译到 lib/
+npm test               # 141 个单测/集成测试（node:test，无外部依赖）
+npm run check:client   # 校验 client 产物的装载协议、6 个挂载点、提醒 Definition 的匹配规则
+npm run check:notice   # 用假 React 真渲染一遍提醒卡片 / 待处理条 / 只读面板，并点一次按钮验证动作链路
+npm run verify         # build + check:client + check:notice + test
+```
+
+浏览器级验证（用真实 Chrome 打开面板，检查挂载、tab、控制台异常）：
+
+```bash
+# 1. 起一个隔离 profile（不碰你自己的 ~/.dsh）
+mkdir -p .verify/home/profiles
+cp -R ~/.dsh/profiles/web .verify/home/profiles/web
+# 把 .verify/home/profiles/web/package.json 里的依赖改成
+#   "@local/dsh-superagent-butler": "link:<绝对路径>/dsh-superagent-butler"
+# 并把 bundles 加上 "@local/dsh-superagent-butler"，然后软链 node_modules
+DSH_HOME=$PWD/.verify/home dsh --profile web --port 3081 --no-open
+
+# 2. 另开一个带 CDP 的 Chrome，然后跑脚本
+"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless=new \
+  --remote-debugging-port=9222 --user-data-dir=/tmp/sab-chrome about:blank &
+node scripts/verify-web.mjs http://127.0.0.1:3081 "<启动日志里的 token>"
+```
+
+`scripts/verify-web.mjs` 会检查：侧栏有「管家」按钮、主面板挂载、三个 tab、审计表格有行、没有未捕获异常。
+
+`scripts/verify-panel-readonly.mjs` 用一份假快照（有卡点、在审计划、进行中派发、项目）打开面板，检查 tab 只有「概览/日志/明细」、三个 tab 都能切、面板里**没有任何**改变状态的按钮，并且只浏览面板不会发出任何 `/api/superagent/action` 请求（同一个 Chrome CDP 会话，先起 `--remote-debugging-port=9222`）。
+
+## 已验证 / 未验证
+
+**已验证（自动化）**
+
+- 手动收尾派发（标记完成 / 放弃）：门禁立即解除、待审计划被关闭、失败时通知 worker、对已结束派发重复标记被拒、两种标记都写审计 —— `test/integration/service.test.ts`。
+- 提醒的结构化协议：注入消息的 `source.kind === 'superagent-notice'`、`form === 'notice'`、`notice.actions` 按卡点类型给对按钮、模型可见文本前缀仍是 `【SuperAgent 提醒】` —— `test/integration/service.test.ts`、`test/unit/notices.test.ts`（12 个用例）。
+- 已处理卡点出现在 `snapshot.resolvedBlockers`，提醒卡片据此回显「已处理」 —— 同上。
+- 客户端装载：6 个挂载点（面板 / 侧栏徽标 ×2 / 提醒消息行 / 待处理条）、`superagent-notice` Definition 只抢注带该 source 的 append 消息、渲染节点的 `kind`/`target`/`groupTree` 形状、只读面板 —— `scripts/check-client.mjs`。
+
+- 门禁六种组合、计划批准前后、计划外转审批后再放行、卡点确认下代批与拒绝、dispatch 完成后解除门禁 —— `test/integration/service.test.ts`。
+- 里程碑提醒去重、完成时关闭 dispatch、手动 session 不推送 —— 同上。
+- 路由候选过滤与 Host 校验、状态推导、卡点阈值、风险分级、计划 scope 匹配、存储 schema —— `test/unit/*.test.ts`（140 个）。
+- HTTP 路由：`GET /api/superagent/state`、SSE 首帧、`POST /api/superagent/action` 的各 action 及其错误分支。
+- 重启后管家 session 复用同一条记录（`ensure_butler` 返回同一个 sessionId），审计里有 `recovery/startup`。
+
+**未验证（诚实清单）**
+
+- **没有在真实浏览器里跑过新的提醒卡片**：`agent.inject` 的结构化消息需要重启 `dsh web` 才会由新的 Host 产出，而重启会关掉当前会话，所以只做到「构建 + 单测 + 集成 + 客户端装载自检」。`scripts/verify-panel-readonly.mjs` 需要带 `--remote-debugging-port=9222` 的 Chrome，这次也没跑。
+- **没有跑过真实模型的端到端流程**：隔离 profile 里没有 API 凭证，管家/worker 的 LLM 回合会以 `error` 结束（插件本身不崩）。所以"管家自己挑 session 派活"、"worker 交计划、批准后继续"这两条链路的**模型行为**没有实测，只有 Host 侧的确定性测试。
+- `tools/pre-execute` 是否覆盖 PTC `run_code` 子调用（设计 §12.7-1）没做 spike；当前把 `run_code` 归为高危工具直接拦。
+- `sessionController.prompt` 的 `requestId` 幂等跨重启（§12.7-3）、`userQuestions.answer` 对 continued question 的行为（§12.7-6）没实测。
+- 多标签页同时打开时的 SSE 广播一致性（§12.7-9）没测。
+- 视觉细节（窄屏、深色、卡片在回答流里的间距）只做了代码层面的约束，没有真机截图。
+
+## 自检
+
+`POST /api/superagent/action {"action":"diagnostics"}` 会返回运行期实况：管家 sessionId、当前每个 root agent 的 preset/状态、**本插件是否真的给它装了门禁和 worker 工具**（`installed: true` 表示五个注册点全部成功、没有静默降级）、以及八张表的记录数。排查"为什么没拦"时先看这里。
+
+## 多来源（二期 P1：Claude Code 只读）
+
+`SourceKind = dsh | claude | codex | remote`，`source` 字段贯穿 session/dispatch/blocker/audit 与面板；缺字段一律按 `dsh` 解释，**不迁移**旧数据。
+
+Claude Code 来源是**只读旁路**，默认关闭：
+
+```yaml
+- id: superagent-butler
+  name: "@local/dsh-superagent-butler"
+  config:
+    sources:
+      claude:
+        enabled: true          # 默认 false，显式开启才扫描
+        home: ~/.claude        # 可指向 fixture
+        scanDays: 14           # 只扫最近有更新的会话
+        maxSessions: 500
+        tailBytes: 65536       # 只读文件尾部，不读全文
+        includeSubagents: true
+        watch: true            # fs.watch 触发缓存失效；另有 15s 定时扫描兜底
+```
+
+能力边界：`list/readEvents/readDigest/subscribe/hardStatus = true`，`send/create/resume/queue/cancel/approvals/questions/plans/softStatusTool/reassign = false`。只读来源**不进派发候选**、显式指定会返回 `target_read_only`；`prompt()`/`create()` 直接抛错，不会静默失败。
+
+它只读三类文件：`~/.claude/projects/**`、`~/.claude/sessions/*.json`（活进程表）、`~/.claude/history.jsonl`（取 goal）；**不读** `sessions/<pid>.key`，**不写** `~/.claude`。
+
+真实机器自检：`npm run probe:claude`（本机 189 个 session：首扫 ~90ms，缓存后 ~33ms）。
+
+## 面板多来源可见性（二期 P3）
+
+- **来源徽标**：`dsh`（品牌色）/ `Claude`（橙）/ `Codex`（绿），彩色圆点 + 名字，颜色由主题 token 决定、三者互不相同；会话表、卡点卡片、计划卡片、派发卡片、提醒卡片（`superagent-notice`）上都带。
+- **来源筛选**：概览页会话区顶部有 `全部 / dsh / Claude / Codex` 药丸筛选，带计数，点一下只看该来源。
+- **只读降级**：外部来源的会话不能在这里打开（`打开` 按钮渲成 disabled + 「该来源不支持：只能看状态与摘要」）；卡点/计划/派发的「在对话里处理」按 `capabilities` 置灰——`approvals`/`questions`/`plans`/`send` 为 false 就不渲染可点按钮（R6：渲了就必须能用）。
+- **已知限制**：出现 Codex 会话时，会话区底部固定显示「Codex 不区分主会话与子会话，这里列出的都按 root 处理」。
+
+验证脚本：`SAB_BASE=<url> SAB_TOKEN=<token> node scripts/verify-sources-ui.mjs`（用假快照同时渲染三种来源，断言徽标/筛选/置灰/限制文案）与 `SAB_BASE=<url> SAB_TOKEN=<token> node scripts/verify-panel-readonly.mjs`（断言面板无任何会改状态的按钮、浏览不发 action 请求）。
+
+## 进度通知（B-1）
+
+进度事件（里程碑 / 阶段结束 / 卡点消失 / 停滞）现在**落盘并进快照**，面板概览页的「进度」时间线靠现有 2 秒轮询实时刷新——不需要你先发消息。
+
+- 快照字段：`progressNotices: ButlerNotice[]`（与 `blockerNotices` 严格分开，不进待办、不阻塞、无按钮）。
+- 生命周期：`status: open → expired`，`progress.ttlMs` 默认 24 小时，`progress.queueLimit` 默认 50 条。
+- 幂等：进度注入保留给模型看，但带 `modelOnly: true`，客户端不再渲成对话卡片（避免看两遍）。
+- 唤醒管家（默认开，可整段关闭）：
+
+```yaml
+progress:
+  wake:
+    enabled: true        # false = 完全静默
+    kinds: ['stage_end', 'watchdog']   # 纯里程碑不唤醒
+    maxPerDispatch: 2    # 同一条派发最多唤醒几次
+    minGapMs: 120000     # 两次唤醒最小间隔；管家 running 时不唤醒
+```
+
+真机验收脚本：`SAB_BASE=<url> SAB_TOKEN=<token> node scripts/verify-progress-live.mjs`（断言无消息时 2 秒内出现、刷新后仍在、未污染 `blockerNotices`）。
+
+## 来源健康与启动隔离（P0 修复）
+
+来宾来源（claude/codex）坏掉**不会**再拖垮插件：
+
+- 注册（构造 + `start()`）整体 try/catch，失败只标记该来源不可用；
+- `list()` 的失败按来源隔离（`SourceRegistry.list({onError})`），其它来源照常；
+- 会话落库前校验 `sessionId` 必须是 storage 的合法 per-record key（`^[A-Za-z0-9_-]+$`），非法就跳过持久化而不是抛；
+- 万一是服务本身创建失败，`apply()` 会加载**降级服务**并照常 `provide('superagent')`——管家仍然能说话、工具会返回原始错误，而不是"整个管家失联"。
+
+快照 `snapshot.sources` 会给出每个来源的 `{kind, enabled, available, error?, at}`，面板/工具都能看到原因。
+
+冷启动回归（已进 `npm run verify`）：
+
+```bash
+npm run smoke:cold-start   # 真实 dsh web + claude/codex 双开（fixture 含子会话）
+```
+
+## 配置项
+
+默认值见 `src/types.ts` 的 `DEFAULT_CONFIG`，可在 bundle patch 的 `config` 下覆盖（如 `butler.title`、`butler.cwd`、`planReview.allowReadOnlyBash`、`progress.notifyMilestones`、`scanIntervalMs`）。提醒相关的 `reminderCooldownMs`/`maxRemindersPerBlocker` 只作用于本插件，**不受**工作区 `AGENTS.md` 的安静时段与每日上限约束（设计 §6.2）。
+
+## 目录
+
+```
+src/index.ts          Host 入口：建服务、暴露 superagent、注册路由与命令
+src/service.ts        业务核心：门禁、审批、计划、卡点、派发、进度、恢复
+src/host/routes.ts    三条认证 HTTP 路由
+src/host/command.ts   /superagent 命令
+src/butler/index.ts   管家 preset 子插件（只读工具面 + 提示词）
+src/butler-tools.ts   管家工具
+src/worker-tools.ts   worker 上报/交计划工具
+src/client/index.ts   Web 面板（单文件 client module）
+src/router.ts         路由候选与校验
+src/risk.ts           风险分级
+src/blockers.ts       卡点检测
+src/status.ts         事件折叠与状态推导
+src/plans.ts          计划 scope 匹配
+src/store.ts          storageDomain 封装
+test/unit             纯函数单测
+test/integration      fake ctx 的 Host 集成测试
+scripts/              客户端装载自检、浏览器验证
+```

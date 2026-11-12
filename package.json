@@ -1,0 +1,61 @@
+{
+  "name": "@local/dsh-superagent-butler",
+  "version": "0.1.0",
+  "private": true,
+  "description": "SuperAgent 管家：本机 dsh session 的只读管家、卡点检测、计划审查、派发与审批代理",
+  "type": "module",
+  "engines": {
+    "dsh": "^0.2.1-rc.2",
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "exports": {
+    ".": "./lib/index.js",
+    "./butler": "./lib/butler/index.js",
+    "./client": "./lib/client/index.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/**/*.js",
+    "lib/**/*.d.ts",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-sidebar",
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-workspace",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-chat",
+        "@deepseek-ai/dsh-client-locale"
+      ]
+    }
+  },
+  "scripts": {
+    "build": "node ../page-workflow/node_modules/typescript/bin/tsc -p tsconfig.host.json && node ../page-workflow/node_modules/typescript/bin/tsc -p tsconfig.client.json",
+    "test": "node ../page-workflow/node_modules/typescript/bin/tsc -p tsconfig.test.json && node --test test-dist/test/unit/*.test.js test-dist/test/integration/*.test.js",
+    "typecheck": "node ../page-workflow/node_modules/typescript/bin/tsc -p tsconfig.host.json --noEmit",
+    "check:client": "node scripts/check-client.mjs",
+    "check:notice": "node scripts/check-notice-render.mjs",
+    "verify": "npm run build && npm run check:client && npm run check:notice && npm test && npm run smoke:cold-start",
+    "check:panel": "node scripts/verify-panel-readonly.mjs",
+    "probe:claude": "node scripts/probe-claude.mjs",
+    "verify:sources-ui": "node scripts/verify-sources-ui.mjs",
+    "verify:panel": "node scripts/verify-panel-readonly.mjs",
+    "probe:codex": "node scripts/probe-codex.mjs",
+    "smoke:cold-start": "node scripts/smoke-cold-start.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0"
+  }
+}

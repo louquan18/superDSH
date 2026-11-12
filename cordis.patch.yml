@@ -1,0 +1,29 @@
+- insert:
+    - id: superagent-butler
+      name: '@local/dsh-superagent-butler'
+      config:
+        butler:
+          title: SuperAgent 管家
+    - id: preset-superagent-butler
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: superagent-butler
+        name: SuperAgent 管家
+        description: 只读管家：状态、卡点、计划审查、派发与审批
+        order: 2
+        plugins:
+          - id: butler-time
+            name: '@deepseek-ai/dsh-time-context'
+          - id: butler-fs
+            name: '@deepseek-ai/dsh-tool-fs'
+            config:
+              read: true
+              readImage: true
+              write: false
+              edit: false
+          - id: butler-fs-search
+            name: '@deepseek-ai/dsh-tool-fs-search'
+            config:
+              sampleOverCapGlobResults: false
+          - id: butler-agent
+            name: '@local/dsh-superagent-butler/butler'
