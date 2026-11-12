@@ -113,6 +113,32 @@ export interface DispatchProgressCursor {
     /** 已经报过几次「阶段结束」，用来让抖动只报一次。 */
     stageEnds?: number;
 }
+/**
+ * 一件「持续进行的活」（P2）。
+ *
+ * 调度单位本来是一条 `Dispatch`（一条派发消息），但「活」和「消息」不是一回事：
+ * 同一条活可能派发多次，卡点、计划、进度都该挂在活上而不是某条消息上。
+ * 有了它才能干净地销账、归档卡点、把审计按活归因。
+ */
+export interface Thread {
+    id: string;
+    title: string;
+    state: 'active' | 'waiting_human' | 'done' | 'abandoned';
+    /** 参与这条活的所有会话（可能换过会话）。 */
+    participantSessionIds: string[];
+    /** 归属的派发，按时间先后。 */
+    dispatchIds: string[];
+    projectKey?: string;
+    /** 外部线程标识（GitHub PR / IM 话题等），本期只留字段不写入。 */
+    externalKeys?: Array<{
+        kind: 'github_pr' | 'im' | 'email' | 'file';
+        key: string;
+    }>;
+    createdAt: number;
+    lastEventAt: number;
+    closedAt?: number;
+    closedBy?: 'user' | 'butler' | 'auto_ttl';
+}
 export interface Dispatch {
     id: string;
     /** 目标会话的来源；缺省按 'dsh'。 */
@@ -134,6 +160,8 @@ export interface Dispatch {
     acceptedAt?: number;
     deliveredAt?: number;
     error?: string;
+    /** 归属的活（P2）。老记录没有，读时按 dispatch 自身兜底。 */
+    threadId?: string;
     /** 按复杂度巡检的配置；缺省 = 老记录，扫描不生成 watchdog 提醒。 */
     watchdog?: DispatchWatchdog;
     /** 进度检测的持久化游标（去重 + 阶段跃迁 + 节流）。 */
@@ -164,6 +192,8 @@ export interface Plan {
     reviewedBy?: 'user' | 'butler-chat';
     source: 'butler_submit_plan' | 'native_plan_mode';
     stale?: boolean;
+    /** 归属的活（P2）。 */
+    threadId?: string;
 }
 export interface Blocker {
     id: string;
@@ -185,6 +215,8 @@ export interface Blocker {
     lastRemindedAt?: number;
     resolvedAt?: number;
     resolution?: string;
+    /** 归属的活（P2）。 */
+    threadId?: string;
     relatedPlanId?: string;
     relatedApprovalId?: string;
     relatedCallId?: string;
@@ -233,6 +265,8 @@ export interface AuditEntry {
     configHash?: string;
     /** 归属的派发（P1 台账外键）。老记录没有，按 sessionId + 时间窗兜底。 */
     dispatchId?: string;
+    /** 归属的活（P2）。 */
+    threadId?: string;
     /** 归属的卡点（P1）：把「提醒」和「卡点最终怎么消失」对上。 */
     blockerId?: string;
     /** 这条审计是哪条自动规则的决策（见 `policy.ts` 的 RULES）。为空 = 不是规则决策。 */
@@ -311,6 +345,14 @@ export interface Snapshot {
     dispatches: Dispatch[];
     approvals: Approval[];
     audit: AuditEntry[];
+    /**
+     * 「一件件活」（P2）。只给面板看：状态、参与会话、未结束派发/卡点数。
+     * `thread.enabled=false` 时为空数组，老客户端忽略这个字段也不影响。
+     */
+    threads?: Array<Thread & {
+        openDispatches: number;
+        openBlockers: number;
+    }>;
     /**
      * 自动决策的准确率台账（P1）。每条规则给 n / tp / fp / fn / Wilson 下界 / 当前模式，
      * 面板「明细」页直接渲染。没有它，shadow 攒的证据就没人看得到。
@@ -559,6 +601,12 @@ export interface Config {
      * 策略引擎（P1）：让自动决策带可观测的准确率，跌破阈值就自动退回「只记录」。
      * 整段关掉 = 回到今天的语义（所有规则照常执行）。
      */
+    /** Thread 聚合（P2）。关掉 = 销账回到按 dispatch、卡点不随活归档。 */
+    thread: {
+        enabled: boolean;
+        /** 活闲置这么久（毫秒）没有活动且无待审计划 → 自动标 abandoned。 */
+        idleAbandonMs: number;
+    };
     policy: {
         enabled: boolean;
         /** 首发只记录不动作的规则（攒证据）；证明自己够准后会被自动晋升。 */

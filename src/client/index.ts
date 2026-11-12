@@ -1021,6 +1021,45 @@
       ),
       h(
         Section,
+        { title: `进行中的活 · ${(snapshot.threads ?? []).filter((item: any) => item.state !== 'done' && item.state !== 'abandoned').length}` },
+        (snapshot.threads ?? []).length === 0
+          ? [h(Empty, { key: 'empty', children: '还没有按「活」聚合的记录。' })]
+          : [
+              h(
+                'table',
+                { className: 'sab-table', key: 'threads' },
+                h(
+                  'thead',
+                  null,
+                  h(
+                    'tr',
+                    null,
+                    ['活', '状态', '派发', '未结束', '卡点', '最近活动'].map((label) =>
+                      h('th', { key: label }, label),
+                    ),
+                  ),
+                ),
+                h(
+                  'tbody',
+                  null,
+                  (snapshot.threads ?? []).map((item: any) =>
+                    h(
+                      'tr',
+                      { key: item.id },
+                      h('td', null, item.title),
+                      h('td', null, THREAD_STATE_LABEL[item.state] ?? item.state),
+                      h('td', null, String(item.dispatchIds?.length ?? 0)),
+                      h('td', null, String(item.openDispatches ?? 0)),
+                      h('td', null, String(item.openBlockers ?? 0)),
+                      h('td', null, fmtTime(item.lastEventAt)),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+      ),
+      h(
+        Section,
         { title: `自动决策准确率 · 近 ${snapshot.policyStats?.windowDays ?? 7} 天` },
         [h(PolicyRules, { key: 'policy', stats: snapshot.policyStats })],
       ),
@@ -1030,6 +1069,13 @@
         [h(ModesView, { key: 'modes', snapshot, api, readOnly: true })],
       ),
     )
+  }
+
+  const THREAD_STATE_LABEL: Record<string, string> = {
+    active: '进行中',
+    waiting_human: '等你销账',
+    done: '已完成',
+    abandoned: '已放弃',
   }
 
   function Panel(props: any) {

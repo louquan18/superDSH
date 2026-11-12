@@ -209,6 +209,30 @@ progress:
 npm run smoke:cold-start   # 真实 dsh web + claude/codex 双开（fixture 含子会话）
 ```
 
+## 按「活」聚合与销账（P2）
+
+调度单位本来是「一条派发消息」，但**活和消息不是一回事**：同一件活可能派发多次、换过会话，卡点、计划、进度都该挂在活上。现在引入 `Thread`（一件持续进行的活）：
+
+- **建活**：派发时自动建一条活并挂上 `threadId`；如果这次派发取代了上一条没结束的派发（同一 session 追加指令），**沿用同一条活**——它是同一件事的延续，不是新任务。
+- **状态机**：`active`（有未结束派发）→ `waiting_human`（派发都结束了，等你确认）→ `done` / `abandoned`。
+- **不做自动销账**：worker 自报「完成」只把活推进到 `waiting_human`，绝不自动 `done`。因为销账会取消待审计划并解除 plan gate，一错就是放开 worker 的写权限。人（面板/对话）或管家显式确认才关。
+- **销账即归档**：活关闭时，它名下还开着的卡点统一转 `auto_resolved`。今天收件箱里那 8 条 open 里 7 条是 11-09 的僵尸，这条规则就是治它们的。
+- **管家工具**：`butler_thread`（`action=list` 看还开着的活、`action=close` 销账；只能按用户明确指令关）。
+- **面板**：「明细」页有「进行中的活」表（活的标题、状态、派发数、未结束数、卡点数、最近活动）。
+- **双写期**：`dispatch.status` 的语义**完全不变**，门禁和 watchdog 继续看 dispatch，thread 只做聚合。关掉 `thread.enabled` 就回到 P1 之前的行为。
+
+```yaml
+thread:
+  enabled: true
+  idleAbandonMs: 604800000   # 7 天无活动、无未结束派发、无待审计划 → 自动标 abandoned（绝不自动 done）
+```
+
+### 存储升级到 v2（升级前务必看这条）
+
+`threads` 是第 9 张表，`STORAGE_SPEC.version` 从 1 升到 2。**`compatibleVersions: [1]` 是必须的**：per-record 布局下每条记录自带版本戳，不在接受集合内的记录会被**读作不存在**（不是迁移，是静默消失），漏写这一行用户会以为数据全丢了。
+
+防回归：`npm run smoke:upgrade` 把**真实存储目录的副本**放进隔离 home，用当前代码冷启动后逐表核对 counts。反向验证过——把 `compatibleVersions` 删掉，这个冒烟会红（`sessions 84 → 0`）。
+
 ## 自动决策准确率与 shadow（P1）
 
 系统替你做过的判断（发提醒、拒命令、派任务）现在**都进台账，并且事后会被判定对错**——用来回答一个问题：这条规则现在还准吗。

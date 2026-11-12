@@ -139,6 +139,21 @@ export declare class SuperagentService {
     private flushButlerNotices;
     /** §6.4：只对管家派发的任务推进度，手动 session 只更新面板。 */
     private noteProgress;
+    /** 新开一条活。标题取派发首行，参与者先放目标会话。 */
+    private openThreadForDispatch;
+    /** 沿用已有活：补上派发与会话。 */
+    private attachDispatchToThread;
+    /**
+     * 派发收尾后重算活的状态。
+     *
+     * 注意：**不做自动销账**。没有进行中的派发就停在 `waiting_human`，等人（或管家）确认，
+     * 因为销账会取消待审计划并解除 plan gate，自动做风险太大。
+     */
+    private settleThread;
+    /** 管家工具 `butler_thread action=list` 的返回：只看还有意义的活。 */
+    listThreadsView(): any;
+    /** 销账（或放弃）一条活：状态落定 + 名下卡点随之归档。 */
+    closeThread(threadId: string, state: 'done' | 'abandoned', by?: 'user' | 'butler' | 'auto_ttl'): Promise<any>;
     private completeDispatch;
     private noteTurnEnd;
     /**

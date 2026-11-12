@@ -1,4 +1,4 @@
-import type { Approval, AuditEntry, Blocker, Dispatch, ManagedSession, Meta, Plan, ProgressNoticeRecord, Project } from './types.js';
+import type { Approval, AuditEntry, Blocker, Dispatch, ManagedSession, Meta, Plan, ProgressNoticeRecord, Project, Thread } from './types.js';
 /** 判断一个外部来源的会话 id 能不能安全落库。 */
 export declare function isSafeRecordKey(key: string): boolean;
 export declare const STORAGE_SPEC: any;
@@ -55,6 +55,11 @@ export declare class Store {
     getApproval(id: string): Approval | undefined;
     putApproval(approval: Approval): Promise<void>;
     listAudit(): AuditEntry[];
+    listThreads(): Thread[];
+    getThread(id: string): Thread | undefined;
+    putThread(thread: Thread): Promise<void>;
+    /** 某个会话上还在进行的活（active / waiting_human），按最近活动排序。 */
+    activeThreadForSession(sessionId: string): Thread | undefined;
     /** 事后回填标注结果（P1）：只改 outcome 相关字段，不碰原始决策内容。 */
     updateAudit(id: string, patch: Partial<Pick<AuditEntry, 'outcome' | 'outcomeRule' | 'outcomeAt'>>): Promise<AuditEntry | undefined>;
     appendAudit(entry: Omit<AuditEntry, 'id' | 'at'> & {

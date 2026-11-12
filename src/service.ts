@@ -78,6 +78,7 @@ import type {
   RouteDecision,
   SessionView,
   Snapshot,
+  Thread,
   SoftStatus,
   ToolIntent,
 } from './types.js'
@@ -1033,6 +1034,126 @@ export class SuperagentService {
     }
   }
 
+  /** 新开一条活。标题取派发首行，参与者先放目标会话。 */
+  private async openThreadForDispatch(dispatch: Dispatch): Promise<Thread> {
+    const at = now()
+    const thread: Thread = {
+      id: shortId('thd'),
+      title: firstLine(dispatch.text, 60),
+      state: 'active',
+      participantSessionIds: [dispatch.targetSessionId],
+      dispatchIds: [dispatch.id],
+      createdAt: at,
+      lastEventAt: at,
+    }
+    await this.store.putThread(thread)
+    return thread
+  }
+
+  /** 沿用已有活：补上派发与会话。 */
+  private async attachDispatchToThread(thread: Thread, dispatch: Dispatch): Promise<string> {
+    if (!thread.dispatchIds.includes(dispatch.id)) thread.dispatchIds.push(dispatch.id)
+    if (!thread.participantSessionIds.includes(dispatch.targetSessionId)) {
+      thread.participantSessionIds.push(dispatch.targetSessionId)
+    }
+    thread.state = 'active'
+    thread.lastEventAt = now()
+    await this.store.putThread(thread)
+    return thread.id
+  }
+
+  /**
+   * 派发收尾后重算活的状态。
+   *
+   * 注意：**不做自动销账**。没有进行中的派发就停在 `waiting_human`，等人（或管家）确认，
+   * 因为销账会取消待审计划并解除 plan gate，自动做风险太大。
+   */
+  private async settleThread(threadId: string | undefined): Promise<void> {
+    if (!this.config.thread.enabled || !threadId) return
+    const thread = this.store.getThread(threadId)
+    if (!thread) return
+    if (thread.state === 'done' || thread.state === 'abandoned') return
+    const open = thread.dispatchIds
+      .map((id) => this.store.getDispatch(id))
+      .filter((item): item is Dispatch => Boolean(item) && isOpenDispatch(item!))
+    thread.state = open.length > 0 ? 'active' : 'waiting_human'
+    thread.lastEventAt = now()
+    await this.store.putThread(thread)
+  }
+
+  /** 管家工具 `butler_thread action=list` 的返回：只看还有意义的活。 */
+  listThreadsView(): any {
+    const threads = this.store
+      .listThreads()
+      .filter((thread) => thread.state === 'active' || thread.state === 'waiting_human')
+      .sort((a, b) => b.lastEventAt - a.lastEventAt)
+      .slice(0, 30)
+      .map((thread) => ({
+        threadId: thread.id,
+        title: thread.title,
+        state: thread.state,
+        sessions: thread.participantSessionIds.length,
+        dispatches: thread.dispatchIds.length,
+        openDispatches: thread.dispatchIds
+          .map((id) => this.store.getDispatch(id))
+          .filter((item): item is Dispatch => Boolean(item) && isOpenDispatch(item!)).length,
+        openBlockers: this.store
+          .listBlockers()
+          .filter(
+            (item) =>
+              item.threadId === thread.id &&
+              (item.status === 'open' || item.status === 'notified'),
+          ).length,
+        lastEventAt: thread.lastEventAt,
+      }))
+    return { threads, count: threads.length }
+  }
+
+  /** 销账（或放弃）一条活：状态落定 + 名下卡点随之归档。 */
+  async closeThread(
+    threadId: string,
+    state: 'done' | 'abandoned',
+    by: 'user' | 'butler' | 'auto_ttl' = 'user',
+  ): Promise<any> {
+    if (!this.config.thread.enabled) return { ok: false, message: 'thread 功能未开启' }
+    const thread = this.store.getThread(threadId)
+    if (!thread) return { ok: false, message: 'thread 不存在' }
+    if (thread.state === 'done' || thread.state === 'abandoned') {
+      return { ok: false, message: `这条活已经结束（${thread.state}）` }
+    }
+    const open = thread.dispatchIds
+      .map((id) => this.store.getDispatch(id))
+      .filter((item): item is Dispatch => Boolean(item) && isOpenDispatch(item!))
+    if (open.length > 0) {
+      return { ok: false, message: `还有 ${open.length} 条派发没结束，先收尾派发` }
+    }
+    const before = this.store
+      .listBlockers()
+      .filter(
+        (item) =>
+          item.threadId === threadId && (item.status === 'open' || item.status === 'notified'),
+      ).length
+    thread.state = state
+    thread.closedAt = now()
+    thread.closedBy = by
+    thread.lastEventAt = now()
+    await this.store.putThread(thread)
+    await this.resolveBlockersBy(
+      (blocker) => blocker.threadId === threadId,
+      state === 'done' ? '活已销账' : '活已放弃',
+    )
+    await this.store.appendAudit({
+      sessionId: thread.participantSessionIds[0],
+      kind: 'dispatch',
+      action: state === 'done' ? 'thread_done' : 'thread_abandoned',
+      threadId,
+      by: by === 'user' ? 'user' : by === 'butler' ? 'butler-chat' : 'butler-auto',
+      note: `${thread.title}（归档卡点 ${before} 条）`,
+    })
+    this.queueEmit()
+    return { ok: true, threadId, state, archivedBlockers: before }
+  }
+
   private async completeDispatch(
     dispatch: Dispatch,
     title: string,
@@ -1041,10 +1162,13 @@ export class SuperagentService {
     if (dispatch.status === 'completed') return
     dispatch.status = 'completed'
     await this.store.putDispatch(dispatch)
+    await this.settleThread(dispatch.threadId)
     await this.store.appendAudit({
       sessionId: dispatch.targetSessionId,
       kind: 'dispatch',
       action: 'completed',
+      dispatchId: dispatch.id,
+      threadId: dispatch.threadId,
       decision: 'completed',
       by: 'butler-auto',
       note: firstLine(soft.goal ?? dispatch.text, 120),
@@ -1568,6 +1692,10 @@ export class SuperagentService {
         detectedAt: now(),
         lastSeenAt: now(),
         reminderCount: 0,
+        threadId: this.config.thread.enabled
+          ? (this.store.currentDispatch(sessionId)?.threadId ??
+            this.store.activeThreadForSession(sessionId)?.id)
+          : undefined,
         relatedPlanId: item.relatedPlanId,
         relatedApprovalId: item.relatedApprovalId,
         relatedCallId: item.relatedCallId,
@@ -2771,6 +2899,7 @@ export class SuperagentService {
     if (previous) {
       previous.status = 'superseded'
       await this.store.putDispatch(previous)
+      await this.settleThread(previous.threadId)
       for (const plan of this.store.listPlans()) {
         if (plan.dispatchId === previous.id && plan.status === 'pending_review') {
           plan.status = 'superseded'
@@ -2783,6 +2912,8 @@ export class SuperagentService {
       targetSessionId: decision.sessionId,
       project,
       mode: 'reuse',
+      // 取代了上一条派发 = 同一件活，沿用它的 thread
+      reuseThreadId: previous?.threadId,
       reason: decision.reason,
       relatedSessionIds: [],
       fromButlerSessionId,
@@ -2798,6 +2929,8 @@ export class SuperagentService {
   }
 
   private async startDispatch(input: {
+    /** 续活：上一条被取代 / 改派前的派发属于同一件活时传入，沿用它的 thread。 */
+    reuseThreadId?: string
     text: string
     targetSessionId: string
     project: Project
@@ -2833,6 +2966,15 @@ export class SuperagentService {
       createdAt: at,
       watchdog: resolveWatchdog(input.watchdog, input.text, this.config.watchdog),
       progress: seedDispatchCursor(at, soft?.done),
+    }
+    // P2：派发挂到「一件活」上。有前一条派发（被取代/改派）就沿用它的活，否则新开一条。
+    if (this.config.thread.enabled) {
+      const thread = input.reuseThreadId
+        ? this.store.getThread(input.reuseThreadId)
+        : undefined
+      dispatch.threadId = thread
+        ? await this.attachDispatchToThread(thread, dispatch)
+        : (await this.openThreadForDispatch(dispatch)).id
     }
     // 报告路径（noteProgress）用进程内的 progressKeys 去重。把目标会话的历史 done 按这条
     // 派发的 key 预先登记：worker 首次上报若原样带回上一轮的 done，不会被当成新里程碑再推一遍
@@ -2913,6 +3055,12 @@ export class SuperagentService {
     dispatch.status = outcome
     if (outcome === 'failed') dispatch.error = note ? String(note) : '用户放弃'
     await this.store.putDispatch(dispatch)
+    await this.settleThread(dispatch.threadId)
+    // P2：人工把派发标成完成，就是对「这件活」的确认 → 顺势销账；
+    // 标记失败只是重算状态（活可能还要重派），不销账。
+    if (outcome === 'completed' && dispatch.threadId) {
+      await this.closeThread(dispatch.threadId, 'done', by === 'user' ? 'user' : 'butler')
+    }
 
     let cancelledPlans = 0
     for (const plan of this.store.listPlans()) {
@@ -3252,6 +3400,7 @@ export class SuperagentService {
         blockers: this.store.listBlockers().length,
         approvals: this.store.listApprovals().length,
         audit: this.store.listAudit().length,
+        threads: this.store.listThreads().length,
       },
     }
   }
@@ -3388,6 +3537,25 @@ export class SuperagentService {
       dispatches,
       approvals,
       audit,
+      threads: this.config.thread.enabled
+        ? this.store
+            .listThreads()
+            .sort((a, b) => b.lastEventAt - a.lastEventAt)
+            .slice(0, 60)
+            .map((thread) => ({
+              ...thread,
+              openDispatches: thread.dispatchIds
+                .map((id) => this.store.getDispatch(id))
+                .filter((item): item is Dispatch => Boolean(item) && isOpenDispatch(item!)).length,
+              openBlockers: this.store
+                .listBlockers()
+                .filter(
+                  (item) =>
+                    item.threadId === thread.id &&
+                    (item.status === 'open' || item.status === 'notified'),
+                ).length,
+            }))
+        : [],
       policyStats: this.policyStatsView(),
     }
   }
@@ -3490,6 +3658,25 @@ export class SuperagentService {
     // P1：按间隔跑一轮决策标注（默认 5 分钟），把"后来怎么样"回填进台账
     if (now() - this.lastLabelAt >= this.config.policy.labelIntervalMs) {
       await this.runLabeling()
+    }
+    // P2：长期不动的活标 abandoned。只动 abandoned，**绝不动 done**——
+    // 自动销账会解除 plan gate，那件事必须由人确认。
+    if (this.config.thread.enabled) {
+      const cutoff = now() - this.config.thread.idleAbandonMs
+      for (const thread of this.store.listThreads()) {
+        if (thread.state !== 'active' && thread.state !== 'waiting_human') continue
+        if (thread.lastEventAt > cutoff) continue
+        const open = thread.dispatchIds
+          .map((id) => this.store.getDispatch(id))
+          .filter((item): item is Dispatch => Boolean(item) && isOpenDispatch(item!))
+        if (open.length > 0) continue
+        const pendingPlan = this.store.listPlans().some(
+          (plan) =>
+            thread.dispatchIds.includes(plan.dispatchId) && plan.status === 'pending_review',
+        )
+        if (pendingPlan) continue
+        await this.closeThread(thread.id, 'abandoned', 'auto_ttl')
+      }
     }
     this.queueEmit()
   }

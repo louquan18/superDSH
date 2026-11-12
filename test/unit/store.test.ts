@@ -7,8 +7,10 @@ const tables = STORAGE_SPEC.tables
 
 test('STORAGE_SPEC declares the documented tables and per-record layout', () => {
   assert.equal(STORAGE_SPEC.name, 'superagent')
-  assert.equal(STORAGE_SPEC.version, 1)
+  assert.equal(STORAGE_SPEC.version, 2)
   assert.equal(STORAGE_SPEC.layout, 'per-record')
+  // P2：升到 v2 必须声明兼容 v1，否则已有 per-record 记录会被读作不存在
+  assert.deepEqual(STORAGE_SPEC.compatibleVersions, [1])
   assert.deepEqual(Object.keys(tables).sort(), [
     'approvals',
     'audit',
@@ -18,6 +20,7 @@ test('STORAGE_SPEC declares the documented tables and per-record layout', () => 
     'plans',
     'projects',
     'sessions',
+    'threads',
   ])
   for (const name of Object.keys(tables)) {
     assert.equal(typeof tables[name].valueSchema.parse, 'function', name)
@@ -96,3 +99,4 @@ test('audit entries require id and a numeric at', () => {
     /invalid superagent record/,
   )
 })
+

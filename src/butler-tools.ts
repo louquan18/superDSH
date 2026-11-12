@@ -284,6 +284,30 @@ export function createButlerTools(service: SuperagentService): any[] {
     },
   })
 
+  const thread = defineTool({
+    name: 'butler_thread',
+    description:
+      'Look at, or close, one "piece of work" (thread). action=list shows open threads with state, session count, open dispatches and open blockers. action=close settles one thread — and only on the user’s explicit instruction: outcome=done when the user says that work is really finished, abandoned when the user drops it. Closing archives that thread’s open blockers; it does not touch plans of other threads. A finished-looking worker summary is NOT the user’s instruction — ask first.',
+    parameters: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['list', 'close'] },
+        threadId: { type: 'string' },
+        outcome: { type: 'string', enum: ['done', 'abandoned'] },
+        note: { type: 'string' },
+      },
+      required: ['action'],
+      additionalProperties: false,
+    },
+    async execute(args, exec) {
+      const denied = ensureButler(service, exec)
+      if (denied) return denied
+      if (String(args.action) === 'list') return service.listThreadsView()
+      const outcome = String(args.outcome ?? 'done') === 'abandoned' ? 'abandoned' : 'done'
+      return service.closeThread(String(args.threadId ?? ''), outcome, 'butler')
+    },
+  })
+
   const resolve = defineTool({
     name: 'butler_resolve',
     description:
@@ -362,11 +386,11 @@ export function createButlerTools(service: SuperagentService): any[] {
     },
   })
 
-  return [status, inbox, readSession, dispatch, send, reassign, dispatchMark, resolve, mode, audit]
+  return [status, inbox, readSession, dispatch, send, reassign, dispatchMark, thread, resolve, mode, audit]
 }
 
 export function butlerToolSchemaSummary(): string {
-  return 'butler_status, butler_inbox, butler_session_read, butler_dispatch, butler_send, butler_reassign, butler_resolve, butler_mode, butler_audit'
+  return 'butler_status, butler_inbox, butler_session_read, butler_dispatch, butler_send, butler_reassign, butler_dispatch_mark, butler_thread, butler_resolve, butler_mode, butler_audit'
 }
 
 export function planScopeSchema(): any {

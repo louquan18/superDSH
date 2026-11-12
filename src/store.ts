@@ -8,6 +8,7 @@ import type {
   Plan,
   ProgressNoticeRecord,
   Project,
+  Thread,
 } from './types.js'
 import { now, shortId } from './util.js'
 
@@ -40,7 +41,13 @@ const hasString = (value: any, key: string) =>
 
 export const STORAGE_SPEC: any = {
   name: 'superagent',
-  version: 1,
+  version: 2,
+  /**
+   * ★ 必须保留 v1：per-record 布局下**每条记录自己带版本戳**，
+   * 版本戳不在接受集合内时，dsh-storage-json 直接把它**读作不存在**（不是迁移，是静默消失）。
+   * 漏掉这一行，现有会话/卡点/审计会全部凭空不见。
+   */
+  compatibleVersions: [1],
   layout: 'per-record',
   tables: {
     meta: {
@@ -98,6 +105,11 @@ export const STORAGE_SPEC: any = {
     audit: {
       valueSchema: schema<AuditEntry>(
         (value) => hasString(value, 'id') && typeof value.at === 'number',
+      ),
+    },
+    threads: {
+      valueSchema: schema<Thread>(
+        (value) => hasString(value, 'id') && hasString(value, 'state'),
       ),
     },
   },
@@ -311,6 +323,29 @@ export class Store {
 
   listAudit(): AuditEntry[] {
     return this.list<AuditEntry>('audit').sort((a, b) => b.at - a.at)
+  }
+
+  listThreads(): Thread[] {
+    return this.list<Thread>('threads')
+  }
+
+  getThread(id: string): Thread | undefined {
+    return this.table<Thread>('threads').get(id)
+  }
+
+  async putThread(thread: Thread): Promise<void> {
+    await this.table<Thread>('threads').put(thread.id, thread)
+  }
+
+  /** 某个会话上还在进行的活（active / waiting_human），按最近活动排序。 */
+  activeThreadForSession(sessionId: string): Thread | undefined {
+    return this.listThreads()
+      .filter(
+        (thread) =>
+          (thread.state === 'active' || thread.state === 'waiting_human') &&
+          thread.participantSessionIds.includes(sessionId),
+      )
+      .sort((a, b) => b.lastEventAt - a.lastEventAt)[0]
   }
 
   /** 事后回填标注结果（P1）：只改 outcome 相关字段，不碰原始决策内容。 */

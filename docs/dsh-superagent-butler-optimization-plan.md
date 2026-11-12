@@ -15,7 +15,7 @@
 |---|---|---|---|
 | **P0** | 版本戳贯穿（git 版本 + 配置指纹进审计与快照） | 0.5 天 | `v0.1.1` ✅ 已完成 |
 | **P1** | 决策台账 + 准确率 + shadow 策略 | 2 天 | `v0.2.0` ✅ 已完成 |
-| **P2** | Thread 生命周期（销账单位从 dispatch 改为 thread） | 3.5 天 | `v0.3.0` |
+| **P2** | Thread 生命周期（销账单位从 dispatch 改为 thread） | 3.5 天 | `v0.3.0` ✅ 已完成 |
 
 四条判断：
 
@@ -204,7 +204,7 @@ policy:
 
 ---
 
-## 5. P2 · Thread 生命周期（3.5 人日，`v0.3.0`）
+## 5. P2 · Thread 生命周期（3.5 人日，`v0.3.0`）— ✅ 已完成 2026-11-12
 
 ### 5.1 第 0 步：存储升级（最容易踩坑，必须先做）
 
@@ -228,6 +228,19 @@ export const STORAGE_SPEC: any = {
 ```
 
 **硬验收**：升级后冷启动，`diagnostics().counts` 必须仍是现状量级（sessions≈83、blockers≈141、audit≈862）；少一个就说明版本戳写错了，立即回退。
+
+### 5.1.1 实施记录：升级验证做了两遍
+
+`npm run smoke:upgrade`（新增）把**真实存储目录的副本**放进隔离 home，用新代码冷启动后逐表核对：
+
+```
+projects 20→20  sessions 84→84  dispatches 14→14  blockers 141→141
+approvals 631→631  audit 864→865  threads 0→0
+```
+
+又做了一次**反向验证**：把 `compatibleVersions` 从 `lib/store.js` 删掉再跑，结果是
+`projects 20→0 / sessions 84→0 / blockers 141→0 / audit 864→1` —— 全表归零，
+冒烟准确报红。这说明这条断言不是装饰。
 
 ### 5.2 数据模型
 
@@ -285,6 +298,19 @@ dispatch 创建 → 找 thread：目标 session 有 active thread 且任务是�
 P2 首发时 **dispatch 的 `status` 语义保持不变**，thread 只做聚合。理由：`butler_dispatch_mark`、`gate()` 的「有进行中派发」判定、watchdog 巡检都依赖 `dispatch.status`，一次性替换风险过高。
 
 `thread.enabled: true|false` 控制聚合视图；下一个版本（v0.4）再让 gate 改看 thread 状态。
+
+### 5.5.1 实施记录（2026-11-12）
+
+落地时确认/调整的几件事：
+
+1. **销账只能由人触发**。`markDispatch(completed)`（人工）会连带 `closeThread(done)`；
+   worker 自报完成只把活推到 `waiting_human`。这条区分很关键：前者是人的确认，后者只是
+   「疑似完成」。实现时一度把销账写进了 `completeDispatch`（自动路径），发现后立刻移走。
+2. **自动 `abandoned` 实现了但只动 abandoned**：闲置超过 `thread.idleAbandonMs`（默认 7 天）、
+   无未结束派发、无待审计划 → 标 abandoned。有单测断言它「绝不标 done」。
+3. **`dispatch.status` 语义零改动**：门禁、watchdog、计划门禁全部继续看 dispatch，
+   thread 只做聚合，`thread.enabled=false` 即回到 P1 行为。
+4. 新增管家工具 `butler_thread`（list / close），工具总数 10 → 11。
 
 ### 5.6 回滚
 

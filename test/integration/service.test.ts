@@ -1720,6 +1720,16 @@ test('B watchdog 口径：有会话活动不算停滞，彻底不动才报一次
 
 // ---------------------------------------------------------------- R1-R5 计划门禁
 
+/** 轮询等待某个条件成立（默认最多 500ms）：用于 `void` 触发的异步收尾。 */
+async function waitFor(predicate: () => boolean, timeoutMs = 500): Promise<boolean> {
+  const started = Date.now()
+  while (Date.now() - started < timeoutMs) {
+    if (predicate()) return true
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+  return predicate()
+}
+
 function turnError(harness: Harness, sessionId: string, message: string, code?: string) {
   harness.emit('session/event', { id: sessionId }, {
     type: 'turn/end',
@@ -2286,4 +2296,151 @@ test('P1 shadow：watchdog 命中 shadow 时只记台账、不发通知、也不
   assert.ok(stat, 'policyStats 要包含 watchdog_stall')
   assert.equal(stat!.mode, 'shadow')
   assert.ok((stat!.unknown ?? 0) >= 1, '未判定的决策要计数')
+})
+
+// ---------------------------------------------------------------- P2 Thread
+
+test('P2 thread：派发建活、取代时复用同一件活、自报完成只到「等你销账」', async () => {
+  const { harness, cwd } = await boot()
+  await withButler(harness, cwd)
+  harness.addAgent('worker-t1', cwd)
+  await harness.service.listSessions(true)
+  // 默认项目模式是 plan_review：没批计划时 worker 报完成不会把派发判为完成。
+  // 这条用例要验的是活的状态机，所以先切到卡点确认模式。
+  await harness.service.setMode(harness.service.ensureProjectForCwd(cwd).key, 'gate_confirm')
+
+  await harness.service.dispatchExecute(
+    { kind: 'reuse', sessionId: 'worker-t1', reason: 't' },
+    '第一件事',
+  )
+  const first = harness.service.store.currentDispatch('worker-t1')!
+  assert.ok(first.threadId, '派发要挂到一条活上')
+  const threadId = first.threadId!
+  const thread = harness.service.store.getThread(threadId)!
+  assert.equal(thread.state, 'active')
+  assert.deepEqual(thread.dispatchIds, [first.id])
+  assert.deepEqual(thread.participantSessionIds, ['worker-t1'])
+
+  // 同一 session 再派一条：上一条被 superseded，属于同一件活的延续 → 复用 thread
+  await harness.service.dispatchExecute(
+    { kind: 'reuse', sessionId: 'worker-t1', reason: 't2' },
+    '继续这件事',
+  )
+  const second = harness.service.store.currentDispatch('worker-t1')!
+  assert.equal(second.threadId, threadId, '取代上一条派发必须沿用同一件活')
+  assert.equal(harness.service.store.listThreads().length, 1, '不该凭空多出一件活')
+
+  // worker 自报完成只是「疑似完成」：活停在等你销账，绝不自动销账
+  await harness.service.noteReport(harness.agents.get('worker-t1'), {
+    goal: '继续这件事',
+    done: ['做完了'],
+    next: [],
+    blockers: [],
+    decisions: [],
+  })
+  // completeDispatch 在 noteProgress 里是 `void` 调用的（不阻塞上报），所以这里等一下状态收敛
+  const settled = await waitFor(
+    () => harness.service.store.getThread(threadId)!.state === 'waiting_human',
+  )
+  assert.ok(settled, `worker 说完成不等于用户确认，实际 ${harness.service.store.getThread(threadId)!.state}`)
+})
+
+test('P2 thread：人工标记完成即销账，并把名下卡点一起归档', async () => {
+  const { harness, cwd } = await boot()
+  await withButler(harness, cwd)
+  harness.addAgent('worker-t2', cwd)
+  await harness.service.listSessions(true)
+  await harness.service.dispatchExecute(
+    { kind: 'reuse', sessionId: 'worker-t2', reason: 't' },
+    '干这件事',
+  )
+  const dispatch = harness.service.store.currentDispatch('worker-t2')!
+  const threadId = dispatch.threadId!
+  await harness.service.store.putBlocker({
+    id: 'blk_t2',
+    sessionId: 'worker-t2',
+    threadId,
+    kind: 'repeated_failure',
+    severity: 'warning',
+    status: 'notified',
+    signature: 'sig-t2',
+    summary: '卡住了',
+    neededAction: '看一眼',
+    evidence: {},
+    detectedAt: Date.now(),
+    lastSeenAt: Date.now(),
+    reminderCount: 1,
+  } as any)
+
+  const out = await harness.service.markDispatch(dispatch.id, 'completed', undefined, 'user')
+  assert.equal(out.ok, true)
+
+  const thread = harness.service.store.getThread(threadId)!
+  assert.equal(thread.state, 'done', '人工收尾就是销账')
+  assert.equal(thread.closedBy, 'user')
+  assert.ok(thread.closedAt)
+
+  const blocker = harness.service.store.getBlocker('blk_t2')!
+  assert.equal(blocker.status, 'auto_resolved', '活销账了，名下卡点不该继续挂着')
+  assert.match(String(blocker.resolution), /销账/)
+})
+
+test('P2 thread：还有未结束派发时拒绝销账', async () => {
+  const { harness, cwd } = await boot()
+  await withButler(harness, cwd)
+  harness.addAgent('worker-t3', cwd)
+  await harness.service.listSessions(true)
+  await harness.service.dispatchExecute(
+    { kind: 'reuse', sessionId: 'worker-t3', reason: 't' },
+    '还没干完的活',
+  )
+  const dispatch = harness.service.store.currentDispatch('worker-t3')!
+  const result = await harness.service.closeThread(dispatch.threadId!, 'done', 'user')
+  assert.equal(result.ok, false)
+  assert.match(String(result.message), /派发/)
+  assert.equal(harness.service.store.getThread(dispatch.threadId!)!.state, 'active')
+})
+
+test('P2 thread：关掉开关后不建活，快照与工具都看不到', async () => {
+  const { harness, cwd } = await boot({ thread: { enabled: false } })
+  await withButler(harness, cwd)
+  harness.addAgent('worker-t4', cwd)
+  await harness.service.listSessions(true)
+  await harness.service.dispatchExecute(
+    { kind: 'reuse', sessionId: 'worker-t4', reason: 't' },
+    '关掉功能的活',
+  )
+  const stored = harness.service.store.currentDispatch('worker-t4')!
+  assert.equal(stored.threadId, undefined, '关掉开关就不该挂 threadId')
+  assert.equal(harness.service.store.listThreads().length, 0)
+  const snapshot = await harness.service.snapshot()
+  assert.deepEqual(snapshot.threads, [])
+  assert.equal(harness.service.listThreadsView().count, 0)
+})
+
+test('P2 thread：长期不动的活自动标 abandoned，但绝不标 done', async () => {
+  const { harness, cwd } = await boot({ thread: { idleAbandonMs: 0 } })
+  await withButler(harness, cwd)
+  harness.addAgent('worker-t5', cwd)
+  await harness.service.listSessions(true)
+  await harness.service.dispatchExecute(
+    { kind: 'reuse', sessionId: 'worker-t5', reason: 't' },
+    '一条没人管的老活',
+  )
+  const dispatch = harness.service.store.currentDispatch('worker-t5')!
+  const threadId = dispatch.threadId!
+  // 先收尾派发（还有未结束派发时不允许放弃）
+  await harness.service.markDispatch(dispatch.id, 'failed', '不做了', 'user')
+  assert.equal(harness.service.store.getThread(threadId)!.state, 'waiting_human')
+
+  // 回拨最近活动时间，模拟闲置超过阈值
+  const thread = harness.service.store.getThread(threadId)!
+  thread.lastEventAt = Date.now() - 10 * 24 * 60 * 60_000
+  await harness.service.store.putThread(thread)
+
+  await (harness.service as any).scan()
+  const after = harness.service.store.getThread(threadId)!
+  assert.equal(after.state, 'abandoned', '长期没人管只能判 abandoned')
+  assert.equal(after.closedBy, 'auto_ttl')
+  assert.notEqual(after.state, 'done', '自动流程永远不许把活标成已完成')
 })
