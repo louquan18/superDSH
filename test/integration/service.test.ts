@@ -1667,7 +1667,9 @@ test('job_kill 白名单：本会话启动的 job 直接放行，别人的 job �
 })
 
 test('B watchdog 口径：有会话活动不算停滞，彻底不动才报一次', async () => {
-  const { harness, cwd } = await boot({ progress: { minGapMs: 0 } })
+  // P1 起 watchdog 默认进 shadow（只记录不提醒），这条测的是 watchdog 机制本身，
+  // 所以显式清空 shadow 名单，让它走真实的 act 路径。shadow 行为由下一条用例覆盖。
+  const { harness, cwd } = await boot({ progress: { minGapMs: 0 }, policy: { shadowRules: [] } })
   const { butler } = await withButler(harness, cwd)
   harness.addAgent('worker-watchdog', cwd)
   await harness.service.listSessions(true)
@@ -2232,4 +2234,56 @@ test('P0 版本戳：快照、审计、meta 三处带同一份 codeVersion / con
   const diagnostics = harness.service.diagnostics()
   assert.equal(diagnostics.version.codeVersion, snapshot.version!.codeVersion)
   assert.equal(diagnostics.version.configHash, snapshot.version!.configHash)
+})
+
+test('P1 shadow：watchdog 命中 shadow 时只记台账、不发通知、也不唤醒管家', async () => {
+  // 默认配置里 watchdog_stall 就在 shadow 名单内（首发只记录，攒证据）
+  const { harness, cwd } = await boot({ progress: { minGapMs: 0 } })
+  const { butler } = await withButler(harness, cwd)
+  harness.addAgent('worker-shadow', cwd)
+  await harness.service.listSessions(true)
+  await harness.service.dispatchExecute(
+    { kind: 'reuse', sessionId: 'worker-shadow', reason: '集成测试' },
+    '跟一下这个任务',
+  )
+  const dispatch = harness.service.store.currentDispatch('worker-shadow')!
+  dispatch.watchdog = { expectedMinutes: 20, pollMinutes: 10 }
+  dispatch.createdAt = Date.now() - 60 * 60_000
+  dispatch.acceptedAt = Date.now() - 45 * 60_000
+  dispatch.progress = {
+    ...dispatch.progress!,
+    lastProgressAt: Date.now() - 45 * 60_000,
+    lastTurnEndAt: Date.now(),
+  }
+  await harness.service.store.putDispatch(dispatch)
+  const runtime =
+    (harness.service as any).runtimes.get('worker-shadow') ??
+    (await (harness.service as any).ensureRuntime('worker-shadow'))
+  runtime.lastActivityAt = Date.now() - 45 * 60_000
+
+  await (harness.service as any).evaluateSession('worker-shadow')
+  ;(harness.service as any).flushProgress('worker-shadow')
+
+  // 1) 用户侧完全无感：没有「没有进展」的提醒
+  assert.equal(
+    notices(butler).filter((text) => /没有进展/.test(text)).length,
+    0,
+    'shadow 期间不能打扰用户',
+  )
+
+  // 2) 但台账里有记录，且标明是 shadow
+  const records = harness.service.store
+    .listAudit()
+    .filter((item) => item.action === 'watchdog_remind')
+  assert.equal(records.length, 1, 'shadow 也要留证据，且只留一条')
+  assert.equal(records[0]!.shadow, true)
+  assert.equal(records[0]!.ruleId, 'watchdog_stall')
+  assert.equal(records[0]!.dispatchId, dispatch.id)
+
+  // 3) 快照里的报表能看出这条规则当前是「只记录」
+  const snapshot = await harness.service.snapshot()
+  const stat = (snapshot.policyStats?.rules ?? []).find((item) => item.ruleId === 'watchdog_stall')
+  assert.ok(stat, 'policyStats 要包含 watchdog_stall')
+  assert.equal(stat!.mode, 'shadow')
+  assert.ok((stat!.unknown ?? 0) >= 1, '未判定的决策要计数')
 })

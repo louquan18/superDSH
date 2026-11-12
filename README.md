@@ -209,6 +209,40 @@ progress:
 npm run smoke:cold-start   # 真实 dsh web + claude/codex 双开（fixture 含子会话）
 ```
 
+## 自动决策准确率与 shadow（P1）
+
+系统替你做过的判断（发提醒、拒命令、派任务）现在**都进台账，并且事后会被判定对错**——用来回答一个问题：这条规则现在还准吗。
+
+- **台账**：每条决策写审计，带 `ruleId`（哪条规则）、`dispatchId` / `blockerId`（归属）、`shadow`（是否只记录）、`outcome`（事后判定）。
+- **标注只用确定性信号，不调模型**（用可能出错的智能评估自己，只会更自信）：
+
+| 规则 | 判成误报的依据 |
+|---|---|
+| `watchdog_stall` | 提醒后 15 分钟内 worker 自己产出真实进度，且期间没有人工介入 |
+| `blocker_repeat_failure` / `blocker_edit_thrash` | 卡点在 15 分钟内条件自行消失（没人管就好了） |
+| `bash_deny` | 被拒的命令 10 分钟内被人工批准（判太严，记漏报） |
+| `dispatch_route` | 该派发随后被 superseded |
+
+- **口径两种并存**：`self_heal`（默认，没人管自己好了就算误报，样本来得快）与 `strict`（只认人工动作，样本少但准）。判不了的一律留 `unknown`，不推断凑数。
+- **统计用 Wilson 下界**，不用裸命中率：`watchdog` 到现在只醒过 14 次，3 次误报就是 79% 命中率，但这在三五个样本上没有意义。样本少于 `minSamples` 时面板显示「不下结论」。
+- **双向迁移**：下界跌破 `demoteBelow` 自动降级为 shadow（规则退休），升破 `promoteAbove` 自动晋升回生效。规则会腐烂，所以必须有退休机制。
+- **首发只 shadow 两条**（`watchdog_stall` + `blocker_repeat_failure`）：只记账、不发提醒、不打扰你，正好覆盖 I-19 / I-20 / I-21 三个假唤醒问题，用真实流量攒证据。
+- 面板「明细」页有「自动决策准确率」表：样本 / 命中率 / 下界 / 对·误报·漏 / 误报依据，模式列标「生效」或「只记录」。
+
+```yaml
+policy:
+  enabled: true
+  shadowRules: ['watchdog_stall', 'blocker_repeat_failure']  # 只记录不动作
+  minSamples: 20        # 样本不足不下结论
+  demoteBelow: 0.70     # 下界跌破 → 降级为 shadow
+  promoteAbove: 0.90    # 下界升破 → 从 shadow 晋升
+  windowDays: 7
+  standard: self_heal   # 或 strict
+  labelIntervalMs: 300000
+```
+
+> shadow 期间**不推进 `reminderCount` 配额**，但会推进节流时间——否则每轮扫描都会刷一条审计。审计里能看到 `shadow: true` 和「本会提醒……」的原因。
+
 ## 配置项
 
 默认值见 `src/types.ts` 的 `DEFAULT_CONFIG`，可在 bundle patch 的 `config` 下覆盖（如 `butler.title`、`butler.cwd`、`planReview.allowReadOnlyBash`、`progress.notifyMilestones`、`scanIntervalMs`）。提醒相关的 `reminderCooldownMs`/`maxRemindersPerBlocker` 只作用于本插件，**不受**工作区 `AGENTS.md` 的安静时段与每日上限约束（设计 §6.2）。

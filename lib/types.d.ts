@@ -231,6 +231,19 @@ export interface AuditEntry {
      */
     codeVersion?: string;
     configHash?: string;
+    /** 归属的派发（P1 台账外键）。老记录没有，按 sessionId + 时间窗兜底。 */
+    dispatchId?: string;
+    /** 归属的卡点（P1）：把「提醒」和「卡点最终怎么消失」对上。 */
+    blockerId?: string;
+    /** 这条审计是哪条自动规则的决策（见 `policy.ts` 的 RULES）。为空 = 不是规则决策。 */
+    ruleId?: string;
+    /** 决策被 shadow 拦下：只记录、未执行（没发提醒、没真拦）。 */
+    shadow?: boolean;
+    /** 事后标注的结论（见 `label.ts`）。 */
+    outcome?: 'tp' | 'fp' | 'fn' | 'unknown';
+    /** 哪条标注规则判的，可复算。 */
+    outcomeRule?: string;
+    outcomeAt?: number;
 }
 export interface SessionView {
     sessionId: string;
@@ -298,6 +311,35 @@ export interface Snapshot {
     dispatches: Dispatch[];
     approvals: Approval[];
     audit: AuditEntry[];
+    /**
+     * 自动决策的准确率台账（P1）。每条规则给 n / tp / fp / fn / Wilson 下界 / 当前模式，
+     * 面板「明细」页直接渲染。没有它，shadow 攒的证据就没人看得到。
+     */
+    policyStats?: PolicyStatsView;
+}
+/** 单条规则的准确率视图（面板用）。 */
+export interface PolicyStatsView {
+    generatedAt: number;
+    windowDays: number;
+    /** 标注口径与判定标准，面板上要写清楚，避免口径变黑盒。 */
+    standard: 'self_heal' | 'strict';
+    minSamples: number;
+    rules: Array<{
+        ruleId: string;
+        label: string;
+        group: string;
+        fpBasis: string;
+        n: number;
+        tp: number;
+        fp: number;
+        fn: number;
+        unknown: number;
+        precision: number;
+        precisionLB: number;
+        mode: 'act' | 'shadow';
+        reason: string;
+        lastAt: number;
+    }>;
 }
 /** 已处理卡点的只读视图，供对话里的提醒卡片回显「已处理」。 */
 export interface ResolvedBlockerView {
@@ -513,6 +555,27 @@ export interface Config {
         allowReadOnlyBash: boolean;
     };
     auditAllLowRisk: boolean;
+    /**
+     * 策略引擎（P1）：让自动决策带可观测的准确率，跌破阈值就自动退回「只记录」。
+     * 整段关掉 = 回到今天的语义（所有规则照常执行）。
+     */
+    policy: {
+        enabled: boolean;
+        /** 首发只记录不动作的规则（攒证据）；证明自己够准后会被自动晋升。 */
+        shadowRules: string[];
+        /** 样本不足不下结论（Wilson 下界在小样本上没有意义）。 */
+        minSamples: number;
+        /** 下界跌破它 → 降级为 shadow（自动退休）。 */
+        demoteBelow: number;
+        /** 下界升破它 → 从 shadow 晋升为 act（自动放行）。 */
+        promoteAbove: number;
+        /** 统计与标注的时间窗（天）。 */
+        windowDays: number;
+        /** 标注口径。 */
+        standard: 'self_heal' | 'strict';
+        /** 标注任务的执行间隔。 */
+        labelIntervalMs: number;
+    };
     progress: {
         notifyMilestones: boolean;
         /** running → idle 且仍有 open dispatch 时报「阶段结束」。 */

@@ -313,6 +313,19 @@ export class Store {
     return this.list<AuditEntry>('audit').sort((a, b) => b.at - a.at)
   }
 
+  /** 事后回填标注结果（P1）：只改 outcome 相关字段，不碰原始决策内容。 */
+  async updateAudit(
+    id: string,
+    patch: Partial<Pick<AuditEntry, 'outcome' | 'outcomeRule' | 'outcomeAt'>>,
+  ): Promise<AuditEntry | undefined> {
+    const table = this.table<AuditEntry>('audit')
+    const current = table.get(id)
+    if (!current) return undefined
+    const next: AuditEntry = { ...current, ...patch }
+    await table.put(id, next)
+    return next
+  }
+
   async appendAudit(entry: Omit<AuditEntry, 'id' | 'at'> & { at?: number }): Promise<AuditEntry> {
     const record: AuditEntry = {
       id: shortId('audit'),

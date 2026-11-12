@@ -55,6 +55,8 @@ export declare class Store {
     getApproval(id: string): Approval | undefined;
     putApproval(approval: Approval): Promise<void>;
     listAudit(): AuditEntry[];
+    /** 事后回填标注结果（P1）：只改 outcome 相关字段，不碰原始决策内容。 */
+    updateAudit(id: string, patch: Partial<Pick<AuditEntry, 'outcome' | 'outcomeRule' | 'outcomeAt'>>): Promise<AuditEntry | undefined>;
     appendAudit(entry: Omit<AuditEntry, 'id' | 'at'> & {
         at?: number;
     }): Promise<AuditEntry>;

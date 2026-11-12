@@ -13,6 +13,8 @@ import {
   type SourceKind,
 } from './sources/types.js'
 import { Store } from './store.js'
+import { computeStats, decidePolicy, ruleMeta, type PolicyDecision, type RuleStat } from './policy.js'
+import { labelDecisions } from './label.js'
 import { resolveVersion, type VersionInfo } from './version.js'
 import { applySessionEvent, createRuntime as newRuntime, deriveHardStatus, foldSession, parseReportStatus, type SessionRuntime } from './status.js'
 import {
@@ -67,6 +69,7 @@ import type {
   ManagedSession,
   Meta,
   Plan,
+  PolicyStatsView,
   ProgressNoticeRecord,
   PlanScopeItem,
   Project,
@@ -126,6 +129,9 @@ export class SuperagentService {
   private meta!: Meta
   private butlerId: string | null = null
   private runtimes = new Map<string, SessionRuntime>()
+  /** P1：规则准确率的缓存（30s），避免每条决策都全量扫审计。 */
+  private statsCache: { at: number; stats: RuleStat[] } | null = null
+  private lastLabelAt = 0
   private runtimeLoadedAt = new Map<string, number>()
   private installed = new Map<string, () => void>()
   private intents = new Map<string, Map<string, ToolIntent>>()
@@ -240,6 +246,7 @@ export class SuperagentService {
     this.installExistingAgents()
     this.startTimers()
     await this.recover()
+    await this.runLabeling()
     this.emit()
   }
 
@@ -1291,13 +1298,36 @@ export class SuperagentService {
     })
     if (JSON.stringify(dispatch.progress) !== before) await this.store.putDispatch(dispatch)
     if (events.length === 0) return
-    const first = events[0]!
+    // P1：watchdog 是自动决策，先过策略引擎。shadow 时只记台账，不发通知、不唤醒管家。
+    const emitted: typeof events = []
+    for (const event of events) {
+      if (event.kind !== 'watchdog') {
+        emitted.push(event)
+        continue
+      }
+      const decision = this.policyFor('watchdog_stall')
+      const shadow = decision.mode === 'shadow'
+      await this.store.appendAudit({
+        sessionId: input.sessionId,
+        kind: 'dispatch',
+        action: 'watchdog_remind',
+        dispatchId: dispatch.id,
+        ruleId: 'watchdog_stall',
+        shadow,
+        note: `${shadow ? 'shadow：本会提醒' : 'watchdog'}「${event.title}」（${decision.reason}）`,
+      })
+      this.statsCache = null
+      if (!shadow) emitted.push(event)
+    }
+    // 游标已经推进过（watchdog 不会因为被 shadow 掉而下一轮重发），这里只决定"要不要说出去"
+    if (emitted.length === 0) return
+    const first = emitted[0]!
     const notice = this.progressNotice(
       input.sessionId,
-      events.length === 1 ? first.title : `${input.title}：${events.length} 条进度更新`,
-      events.length === 1
+      emitted.length === 1 ? first.title : `${input.title}：${emitted.length} 条进度更新`,
+      emitted.length === 1
         ? first.detail
-        : events
+        : emitted
             .map((event) => event.title)
             .slice(-3)
             .join(' / '),
@@ -1305,7 +1335,7 @@ export class SuperagentService {
     )
     const text = [
       '【SuperAgent 进度】',
-      ...events
+      ...emitted
         .slice(-4)
         .map(
           (event) =>
@@ -1314,8 +1344,8 @@ export class SuperagentService {
     ].join('\n')
     this.queueProgress(input.sessionId, text, dispatch.fromButlerSessionId, notice)
     // B-1：先落盘（面板 2 秒轮询就能看到，不再依赖用户先说话），再看要不要唤醒管家。
-    await this.recordProgressNotices(input.sessionId, input.title, dispatch, events)
-    await this.maybeWakeButler(dispatch, events)
+    await this.recordProgressNotices(input.sessionId, input.title, dispatch, emitted)
+    await this.maybeWakeButler(dispatch, emitted)
   }
 
   /**
@@ -1550,6 +1580,7 @@ export class SuperagentService {
         sessionId,
         kind: 'blocker',
         action: 'open',
+        blockerId: blocker.id,
         note: blocker.summary,
       })
     }
@@ -1567,6 +1598,7 @@ export class SuperagentService {
         sessionId,
         kind: 'blocker',
         action: 'auto_resolve',
+        blockerId: blocker.id,
         note: blocker.summary,
       })
     }
@@ -1581,6 +1613,24 @@ export class SuperagentService {
       blocker.lastRemindedAt &&
       now() - blocker.lastRemindedAt < this.config.reminderCooldownMs
     ) {
+      return
+    }
+    const ruleId = this.reminderRuleFor(blocker)
+    const decision = ruleId ? this.policyFor(ruleId) : undefined
+    if (ruleId && decision?.mode === 'shadow') {
+      // shadow：只记账、不发提醒。仍然推进节流时间，否则每轮扫描都会刷一条审计。
+      blocker.lastRemindedAt = now()
+      await this.store.putBlocker(blocker)
+      await this.store.appendAudit({
+        sessionId: blocker.sessionId,
+        kind: 'blocker',
+        action: 'remind',
+        blockerId: blocker.id,
+        ruleId,
+        shadow: true,
+        note: `shadow：本会提醒「${blocker.summary}」（${decision.reason}）`,
+      })
+      this.statsCache = null
       return
     }
     const dispatch = this.store.currentDispatch(blocker.sessionId)
@@ -1611,6 +1661,100 @@ export class SuperagentService {
     blocker.lastRemindedAt = now()
     blocker.reminderCount += 1
     await this.store.putBlocker(blocker)
+    await this.store.appendAudit({
+      sessionId: blocker.sessionId,
+      kind: 'blocker',
+      action: 'remind',
+      blockerId: blocker.id,
+      ...(ruleId ? { ruleId } : {}),
+      note: blocker.summary,
+    })
+    if (ruleId) this.statsCache = null
+  }
+
+  /** 卡点提醒归属于哪条规则；不可迁移的硬卡点（审批/提问/计划/决策）不参与策略引擎。 */
+  private reminderRuleFor(blocker: Blocker): string | undefined {
+    if (blocker.kind !== 'repeated_failure') return undefined
+    return blocker.subkind === 'edit_thrash' ? 'blocker_edit_thrash' : 'blocker_repeat_failure'
+  }
+
+  /** 规则命中率（30s 缓存）：每条决策都全量扫审计太浪费。 */
+  private ruleStats(): RuleStat[] {
+    const at = now()
+    if (this.statsCache && at - this.statsCache.at < 30_000) return this.statsCache.stats
+    const stats = computeStats(this.store.listAudit(), this.config.policy.windowDays, at)
+    this.statsCache = { at, stats }
+    return stats
+  }
+
+  private policyFor(ruleId: string): PolicyDecision {
+    const stat = this.ruleStats().find((item) => item.ruleId === ruleId)
+    return decidePolicy(ruleId, stat, this.config.policy)
+  }
+
+  /**
+   * 跑一轮决策标注（P1）。
+   *
+   * 只回填还没有 outcome 的审计；标注失败绝不影响主链路（门禁、提醒照常）。
+   */
+  private async runLabeling(): Promise<void> {
+    if (!this.config.policy.enabled) return
+    const at = now()
+    try {
+      const updates = labelDecisions({
+        audits: this.store.listAudit(),
+        blockers: this.store.listBlockers(),
+        dispatches: this.store.listDispatches(),
+        notices: this.store.listProgressNotices(),
+        now: at,
+        standard: this.config.policy.standard,
+      })
+      for (const update of updates) {
+        await this.store.updateAudit(update.auditId, {
+          outcome: update.outcome,
+          outcomeRule: update.outcomeRule,
+          outcomeAt: update.outcomeAt,
+        })
+      }
+      if (updates.length > 0) {
+        this.statsCache = null
+        this.queueEmit()
+      }
+    } catch {
+      // 标注是旁路，坏掉也不能影响门禁/提醒
+    }
+    this.lastLabelAt = at
+  }
+
+  /** 面板用的准确率视图：规则元信息 + 统计 + 当前模式，一次给全。 */
+  private policyStatsView(): PolicyStatsView {
+    const at = now()
+    return {
+      generatedAt: at,
+      windowDays: this.config.policy.windowDays,
+      standard: this.config.policy.standard,
+      minSamples: this.config.policy.minSamples,
+      rules: this.ruleStats().map((stat) => {
+        const meta = ruleMeta(stat.ruleId)
+        const decision = decidePolicy(stat.ruleId, stat, this.config.policy)
+        return {
+          ruleId: stat.ruleId,
+          label: meta?.label ?? stat.ruleId,
+          group: meta?.group ?? 'other',
+          fpBasis: meta?.fpBasis ?? '',
+          n: stat.n,
+          tp: stat.tp,
+          fp: stat.fp,
+          fn: stat.fn,
+          unknown: stat.unknown,
+          precision: stat.precision,
+          precisionLB: stat.precisionLB,
+          mode: decision.mode,
+          reason: decision.reason,
+          lastAt: stat.lastAt,
+        }
+      }),
+    }
   }
 
   private intentFor(sessionId: string): Map<string, ToolIntent> {
@@ -1709,6 +1853,8 @@ export class SuperagentService {
       toolName: intent.toolName,
       callId: intent.callId,
       argsSummary: intent.argsSummary,
+      // P1：拒绝是一次自动决策，要进台账；允许不单独成规则（漏报方向由 L3 反查）
+      ...(verdict.allow ? {} : { ruleId: 'bash_deny' }),
       note: `${intent.review === 'readonly' ? '只读审查' : '危险审查'}：${verdict.reason}`,
     })
     if (!verdict.allow) {
@@ -2723,6 +2869,8 @@ export class SuperagentService {
       action: dispatch.status === 'accepted' ? 'dispatch' : 'dispatch_failed',
       decision: dispatch.status,
       by: 'butler-chat',
+      dispatchId: dispatch.id,
+      ruleId: 'dispatch_route',
       note: input.reason,
     })
     this.queueEmit()
@@ -3240,6 +3388,7 @@ export class SuperagentService {
       dispatches,
       approvals,
       audit,
+      policyStats: this.policyStatsView(),
     }
   }
 
@@ -3337,6 +3486,10 @@ export class SuperagentService {
         await this.ensureRuntime(session.sessionId).catch(() => undefined)
       }
       await this.evaluateSession(session.sessionId).catch(() => undefined)
+    }
+    // P1：按间隔跑一轮决策标注（默认 5 分钟），把"后来怎么样"回填进台账
+    if (now() - this.lastLabelAt >= this.config.policy.labelIntervalMs) {
+      await this.runLabeling()
     }
     this.queueEmit()
   }

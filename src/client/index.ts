@@ -918,6 +918,73 @@
   ]
 
   /** 明细：全部只读，交互一律回管家对话。 */
+  /**
+   * P1 自动决策准确率。
+   *
+   * 刻意放进「明细」页而不是新开 tab：面板的 tab 集合被 `verify-panel-readonly.mjs`
+   * 硬断言为「概览 / 日志 / 明细」，新增 tab 会破坏既有验收。
+   */
+  function PolicyRules(props: any) {
+    const stats = props.stats
+    if (!stats || !Array.isArray(stats.rules) || stats.rules.length === 0) {
+      return h(Empty, { children: '还没有规则数据。' })
+    }
+    const standard =
+      stats.standard === 'strict' ? '严格口径（只认人工动作）' : '自愈口径（没人管自己好了算误报）'
+    const modeOf = (mode: string) => (mode === 'shadow' ? '只记录' : '生效')
+    const pct = (value: number) => `${Math.round((value ?? 0) * 100)}%`
+    const notEnough = (rule: any) => (rule.n ?? 0) < (stats.minSamples ?? 20)
+    return h(
+      'div',
+      null,
+      h(
+        'div',
+        { className: 'sab-meta' },
+        `${standard} · 窗口 ${stats.windowDays} 天 · 样本门槛 ${stats.minSamples}（不足不下结论）`,
+      ),
+      h(
+        'table',
+        { className: 'sab-table' },
+        h(
+          'thead',
+          null,
+          h(
+            'tr',
+            null,
+            ['规则', '模式', '样本', '命中率', '下界', '对/误报/漏', '误报依据'].map((label) =>
+              h('th', { key: label }, label),
+            ),
+          ),
+        ),
+        h(
+          'tbody',
+          null,
+          stats.rules.map((rule: any) =>
+            h(
+              'tr',
+              { key: rule.ruleId },
+              h('td', null, rule.label),
+              h(
+                'td',
+                null,
+                h(
+                  Chip,
+                  { kind: rule.mode === 'shadow' ? 'warning' : 'ok' },
+                  modeOf(rule.mode),
+                ),
+              ),
+              h('td', null, notEnough(rule) ? `${rule.n}（不足）` : String(rule.n)),
+              h('td', null, notEnough(rule) ? '不下结论' : pct(rule.precision)),
+              h('td', null, notEnough(rule) ? '不下结论' : pct(rule.precisionLB)),
+              h('td', null, `${rule.tp} / ${rule.fp} / ${rule.fn}`),
+              h('td', { title: rule.reason }, rule.fpBasis),
+            ),
+          ),
+        ),
+      ),
+    )
+  }
+
   function DetailsView(props: any) {
     const { snapshot, api, onJump, onButler } = props
     if (!snapshot) return h(Empty, { children: '正在读取管家状态…' })
@@ -951,6 +1018,11 @@
         Section,
         { title: '派发' },
         [h(DispatchesView, { key: 'dispatches', snapshot, api, onJump, readOnly: true, onButler })],
+      ),
+      h(
+        Section,
+        { title: `自动决策准确率 · 近 ${snapshot.policyStats?.windowDays ?? 7} 天` },
+        [h(PolicyRules, { key: 'policy', stats: snapshot.policyStats })],
       ),
       h(
         Section,

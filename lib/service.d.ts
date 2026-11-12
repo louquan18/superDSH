@@ -20,6 +20,9 @@ export declare class SuperagentService {
     private meta;
     private butlerId;
     private runtimes;
+    /** P1：规则准确率的缓存（30s），避免每条决策都全量扫审计。 */
+    private statsCache;
+    private lastLabelAt;
     private runtimeLoadedAt;
     private installed;
     private intents;
@@ -177,6 +180,19 @@ export declare class SuperagentService {
     private evaluateSession;
     private syncBlockers;
     private maybeRemind;
+    /** 卡点提醒归属于哪条规则；不可迁移的硬卡点（审批/提问/计划/决策）不参与策略引擎。 */
+    private reminderRuleFor;
+    /** 规则命中率（30s 缓存）：每条决策都全量扫审计太浪费。 */
+    private ruleStats;
+    private policyFor;
+    /**
+     * 跑一轮决策标注（P1）。
+     *
+     * 只回填还没有 outcome 的审计；标注失败绝不影响主链路（门禁、提醒照常）。
+     */
+    private runLabeling;
+    /** 面板用的准确率视图：规则元信息 + 统计 + 当前模式，一次给全。 */
+    private policyStatsView;
     private intentFor;
     private riskContext;
     /**
