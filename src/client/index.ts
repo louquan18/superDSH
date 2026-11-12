@@ -132,6 +132,7 @@
     interrupted: '中断',
     decision: '待决策',
     error: '出错',
+    settle_suggest: '疑似完成',
     milestone: '进度',
     dispatch: '派发',
   }

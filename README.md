@@ -233,6 +233,25 @@ thread:
 
 防回归：`npm run smoke:upgrade` 把**真实存储目录的副本**放进隔离 home，用当前代码冷启动后逐表核对 counts。反向验证过——把 `compatibleVersions` 删掉，这个冒烟会红（`sessions 84 → 0`）。
 
+### 建议销账与 TTL 兜底（A 组修复）
+
+活看起来干完但没人收尾时，系统**只建议、不擅自销账**：
+
+- **建议销账**：条件为「会话 idle + worker 的 `next` 为空 + 有完成信号」。会出现一条「疑似完成」卡片，按钮是 **确认完成，销账** / **还在干，继续观察**。点前者等价于人工 `dispatch_mark`（连带关 thread、归档卡点）；点后者 6 小时内不再提。
+- **完成信号**：worker 经 `butler_report_status` 报完（done 非空、next 空、无 blocker）或检测到阶段结束时，把 `suspectDoneAt` 记到 dispatch 上——这是**事实记录**，不是推断。
+- **TTL 兜底**：默认**关闭**。开启后，仅当「超时 + 无活动 + 无待审计划 + 无其它未处理卡点」才会自动转 completed（`by=butler-auto`，写审计 `settle_ttl`）。销账会解除 plan gate，所以这条路默认不启用。
+
+```yaml
+settleSuggest:
+  enabled: true
+  cooldownMs: 21600000   # 忽略后 6 小时内不再提
+settleTtl:
+  enabled: false         # 默认关闭：自动销账风险高
+  minutes: 1440
+```
+
+> 另外两条同源修复：`awaiting_approval` / `awaiting_answer` 期间不再报「没进展」（等的是人，不是 worker）；已报过阶段结束的派发把巡检间隔退避为 2 倍，并把文案从「做到哪了」换成「要不要销账」。
+
 ## 自动决策准确率与 shadow（P1）
 
 系统替你做过的判断（发提醒、拒命令、派任务）现在**都进台账，并且事后会被判定对错**——用来回答一个问题：这条规则现在还准吗。

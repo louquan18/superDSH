@@ -144,6 +144,13 @@ export declare class SuperagentService {
     /** 沿用已有活：补上派发与会话。 */
     private attachDispatchToThread;
     /**
+     * I-28 第 1 层：判断某条派发是不是「看起来干完了但没人收尾」。
+     *
+     * 证据优先级：dispatch.suspectDoneAt（事实）→ cursor.stageEnds（阶段结束过）。
+     * 返回一条 `settle_suggest` 卡点，交给现有提醒通道渲染成可点卡片。
+     */
+    private settleSuggestBlocker;
+    /**
      * 派发收尾后重算活的状态。
      *
      * 注意：**不做自动销账**。没有进行中的派发就停在 `waiting_human`，等人（或管家）确认，
@@ -261,6 +268,12 @@ export declare class SuperagentService {
     setMode(projectKey: string, mode: 'plan_review' | 'gate_confirm'): Promise<any>;
     dispatchCandidates(text: string, workspaceKey?: string, cwd?: string): Promise<any>;
     private resolveProjectForText;
+    /**
+     * I-29：把常见的字段误用归一化（`mode`→`kind`、`targetSessionId`→`sessionId`），
+     * 但**不放松校验**——归一之后仍然只接受 kind 语义。
+     * 报错必须能自我纠正：带上实际收到的键名和最小可用示例。
+     */
+    private normalizeDecision;
     dispatchExecute(decision: RouteDecision, text: string, fromButlerSessionId?: string, watchdog?: any): Promise<any>;
     private startDispatch;
     sendToSession(sessionId: string, text: string): Promise<void>;

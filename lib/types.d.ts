@@ -9,7 +9,12 @@ export type ProjectMode = 'plan_review' | 'gate_confirm';
 export type HardStatus = 'running' | 'idle' | 'awaiting_approval' | 'awaiting_answer' | 'error' | 'interrupted' | 'unknown';
 export type BlockerKind = 'approval' | 'question' | 'plan_review' | 'repeated_failure' | 'stall' | 'interrupted' | 'decision'
 /** 上一轮 turn 报错（可恢复）：和「中断/崩溃」分开，错误原文一定带在证据里。 */
- | 'error';
+ | 'error'
+/**
+ * 建议销账（I-20/I-21/I-28）：活看起来干完了但没人确认。
+ * 只是建议，**绝不自动销账**——点一下才关。
+ */
+ | 'settle_suggest';
 export type BlockerStatus = 'open' | 'notified' | 'resolved' | 'auto_resolved' | 'dismissed' | 'superseded';
 export type DispatchStatus = 'routing' | 'accepted' | 'delivered'
 /** 上一轮出错但派发没结束（可恢复，门禁和进度照常）。 */
@@ -162,6 +167,14 @@ export interface Dispatch {
     error?: string;
     /** 归属的活（P2）。老记录没有，读时按 dispatch 自身兜底。 */
     threadId?: string;
+    /**
+     * 「疑似完成」的时间与依据（I-28 第 2 层）。
+     *
+     * 这是**记录的事实**，不是推断：worker 自己报完（done 非空、next 空、无 blocker），
+     * 或者检测到阶段结束后仍然安静。建议销账用它做依据，不再靠拼条件猜。
+     */
+    suspectDoneAt?: number;
+    suspectDoneReason?: 'report' | 'stage_end';
     /** 按复杂度巡检的配置；缺省 = 老记录，扫描不生成 watchdog 提醒。 */
     watchdog?: DispatchWatchdog;
     /** 进度检测的持久化游标（去重 + 阶段跃迁 + 节流）。 */
@@ -601,6 +614,23 @@ export interface Config {
      * 策略引擎（P1）：让自动决策带可观测的准确率，跌破阈值就自动退回「只记录」。
      * 整段关掉 = 回到今天的语义（所有规则照常执行）。
      */
+    /**
+     * 建议销账（I-28 第 1 层）：活看起来干完时发一条提醒让人点一下。
+     * 不擅自销账；用户忽略后在这段时间内不再重复出现。
+     */
+    settleSuggest: {
+        enabled: boolean;
+        /** 同一 dispatch 被忽略后，多久内不再提。 */
+        cooldownMs: number;
+    };
+    /**
+     * 销账 TTL 兜底（I-28 第 3 层）。**默认关闭**：自动销账会解除 plan gate，
+     * 只在「确认无待审计划 + 长时间无活动」时才允许，且默认不启用。
+     */
+    settleTtl: {
+        enabled: boolean;
+        minutes: number;
+    };
     /** Thread 聚合（P2）。关掉 = 销账回到按 dispatch、卡点不随活归档。 */
     thread: {
         enabled: boolean;

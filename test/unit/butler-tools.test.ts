@@ -223,3 +223,67 @@ test('butler_send 存在的可写会话照常投递', async () => {
   assert.deepEqual(result, { ok: true })
   assert.deepEqual(service.sent, [{ sessionId: 'worker-1', text: '继续' }])
 })
+
+// ---------------------------------------------------------------- I-18 / I-29
+
+/** 只读来宾来源（claude）的桩：能读内容。 */
+function guestService(overrides: any = {}): any {
+  const claude = {
+    kind: 'claude',
+    capabilities: { ...READ_ONLY_CAPABILITIES, readEvents: true, readDigest: true },
+    observe: async () => ({
+      header: { id: 'c-1', cwd: '/tmp/claude-proj', title: 'Claude 会话' },
+      events: [
+        { type: 'user/message', time: 1_700_000_000_000, data: { content: '把 util 的 bug 修了' } },
+        { type: 'assistant/message', time: 1_700_000_001_000, data: { message: { content: '好的' } } },
+      ],
+    }),
+  }
+  return {
+    isButlerAgentSession: () => true,
+    sourceKindOf: (id: string) => (id === 'c-1' ? 'claude' : 'dsh'),
+    sources: {
+      get: (kind: string) => (kind === 'claude' ? claude : undefined),
+    },
+    source: { observe: async () => undefined }, // dsh 单源：没有这个会话
+    ...overrides,
+  }
+}
+
+test('I-18：只读来源的会话能读到内容，并标明来自哪个来源', async () => {
+  const read = tool(guestService(), 'butler_session_read')
+  const result = await read.execute({ sessionId: 'c-1', mode: 'digest' }, exec)
+  assert.equal(result.error, undefined, '能读就不该报错')
+  assert.equal(result.source, 'claude')
+  assert.ok(
+    (result.messages ?? []).some((item: any) => String(item.text).includes('util')),
+    '要真的读到内容，不能是空壳',
+  )
+})
+
+test('I-18：来源不支持读内容时，错误要和「会话不存在」区分开', async () => {
+  const service = guestService()
+  // 把能力改成「只能看状态、不提供内容」
+  const source = service.sources.get('claude')
+  source.capabilities.readEvents = false
+  source.capabilities.readDigest = false
+
+  const read = tool(service, 'butler_session_read')
+  const unsupported = await read.execute({ sessionId: 'c-1' }, exec)
+  assert.equal(unsupported.error, 'source_read_unsupported')
+  assert.equal(unsupported.source, 'claude')
+
+  const missing = await read.execute({ sessionId: 'nope-1' }, exec)
+  assert.equal(missing.error, 'session_not_found')
+  assert.notEqual(missing.error, unsupported.error, '两种情况必须能分开，否则管家无从判断')
+})
+
+test('I-29：butler_dispatch 的说明写清 kind 契约与最小示例', () => {
+  const dispatch = tool(guestService(), 'butler_dispatch')
+  const description = String(dispatch.description)
+  assert.match(description, /kind/)
+  assert.match(description, /"kind":"new","cwd"/)
+  assert.match(description, /"kind":"reuse","sessionId"/)
+  // 说明里要点明 sessionId ≠ targetSessionId 这个历史坑
+  assert.match(description, /targetSessionId/)
+})

@@ -70,6 +70,7 @@ function detect(
     resolved?: Array<{ signature: string; summary: string }>
     now?: number
     config?: Config
+    hardStatus?: string
   } = {},
 ) {
   return detectProgress({
@@ -79,6 +80,7 @@ function detect(
     running: options.running ?? true,
     lastActivityAt: options.lastActivityAt,
     resolved: options.resolved,
+    hardStatus: options.hardStatus,
     config: options.config ?? CONFIG,
     now: options.now ?? NOW,
   })
@@ -570,4 +572,58 @@ test('B resolveWatchdog：什么都不填就按文本粗估，关闭时返回 un
   assert.equal(resolveWatchdog(undefined, '看一下现状', CONFIG.watchdog)?.source, 'estimate')
   assert.equal(resolveWatchdog(undefined, '看一下现状', { ...CONFIG.watchdog, enabled: false }), undefined)
   assert.equal(resolveWatchdog({ quiet: true }, '随便', CONFIG.watchdog)?.quiet, true)
+})
+
+// ---------------------------------------------------------------- I-19 / I-20
+
+test('I-19：等审批 / 等回答期间不报「没进展」', () => {
+  const dispatch = makeDispatch({ watchdog: { pollMinutes: 10 } })
+  // 30 分钟没活动：正常情况下会报一条 watchdog
+  const baseline = detect(dispatch, { lastActivityAt: NOW - 30 * MINUTE })
+  assert.equal(baseline.filter((event) => event.kind === 'watchdog').length, 1)
+
+  for (const hardStatus of ['awaiting_approval', 'awaiting_answer']) {
+    const events = detect(dispatch, { lastActivityAt: NOW - 30 * MINUTE, hardStatus })
+    assert.equal(
+      events.filter((event) => event.kind === 'watchdog').length,
+      0,
+      `${hardStatus} 期间会话本来就是静的，不能报停滞`,
+    )
+  }
+
+  // running / idle 仍然照报（别把正常的巡检也关掉）
+  for (const hardStatus of ['running', 'idle']) {
+    const events = detect(dispatch, { lastActivityAt: NOW - 30 * MINUTE, hardStatus })
+    assert.equal(events.filter((event) => event.kind === 'watchdog').length, 1, hardStatus)
+  }
+})
+
+test('I-20：疑似完成时问「要不要销账」，阶段结束过则降低提醒频率', () => {
+  // (a) 有完成信号 → 文案改成销账，不再问「做到哪了」
+  const suspect = makeDispatch({
+    watchdog: { pollMinutes: 10 },
+    suspectDoneAt: NOW - 20 * MINUTE,
+  })
+  const events = detect(suspect, { lastActivityAt: NOW - 30 * MINUTE })
+  const watchdog = events.find((event) => event.kind === 'watchdog')!
+  assert.ok(watchdog, '仍然要提醒，只是换说法')
+  assert.match(watchdog.title, /销账/)
+  assert.doesNotMatch(watchdog.title, /没有进展/)
+
+  // (b) 报过阶段结束（stageEnds>=1）→ 巡检间隔退避到 2 倍：
+  //     pollMinutes=10 退避后是 20 分钟，15 分钟安静不该报，25 分钟才报。
+  const ended = makeDispatch({
+    watchdog: { pollMinutes: 10 },
+    progress: { notified: [], lastProgressAt: NOW - 40 * MINUTE, stageEnds: 1 },
+  })
+  assert.equal(
+    detect(ended, { lastActivityAt: NOW - 15 * MINUTE }).filter((e) => e.kind === 'watchdog').length,
+    0,
+    '退避后 15 分钟不该报',
+  )
+  assert.equal(
+    detect(ended, { lastActivityAt: NOW - 25 * MINUTE }).filter((e) => e.kind === 'watchdog').length,
+    1,
+    '退避后 25 分钟该报',
+  )
 })

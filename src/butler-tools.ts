@@ -124,7 +124,7 @@ export function createButlerTools(service: SuperagentService): any[] {
   const readSession = defineTool({
     name: 'butler_session_read',
     description:
-      'Read another dsh session (read-only). mode=digest returns recent messages/tool calls/errors; mode=events returns a bounded raw event window. Use this to judge routing or summarize a session when no soft status was reported.',
+      'Read another session (read-only), including read-only guest sources such as Claude Code / Codex. mode=digest returns recent messages/tool calls/errors; mode=events returns a bounded raw event window. Use this to judge routing or summarize a session when no soft status was reported. Results distinguish three cases: {error:"session_not_found"}, {error:"source_read_unsupported"} (that source exposes no content), or the content itself (with a "source" field). For guest sources the content is a read-only digest — you still cannot send, approve, or dispatch to them.',
     parameters: {
       type: 'object',
       properties: {
@@ -140,13 +140,30 @@ export function createButlerTools(service: SuperagentService): any[] {
       if (denied) return denied
       const sessionId = String(args?.sessionId ?? '')
       const limit = Math.max(1, Math.min(30, Number(args?.limit ?? 8)))
-      const observed = await service.source.observe(sessionId)
-      if (!observed) return { error: 'session 不存在或不可读' }
+      // I-18：按来源能力分流。三种结果必须可区分，不能都回「不存在或不可读」。
+      const kind = service.sourceKindOf(sessionId)
+      const owner = service.sources.get(kind)
+      if (!owner) return { error: 'session_not_found', sessionId, source: kind }
+      const capabilities = owner.capabilities
+      if (!capabilities.readEvents && !capabilities.readDigest) {
+        return {
+          error: 'source_read_unsupported',
+          sessionId,
+          source: kind,
+          hint: '该来源只提供状态，不提供内容读取；只能看它在跑什么，看不到具体内容',
+        }
+      }
+      // dsh 保持原来的单源观察路径（行为不变）；来宾来源回退到它自己的来源。
+      const observed =
+        (kind === 'dsh' ? await service.source.observe(sessionId) : undefined) ??
+        (await owner.observe(sessionId))
+      if (!observed) return { error: 'session_not_found', sessionId, source: kind }
       const events = Array.isArray(observed.events) ? observed.events : []
       const digest = digestOf(events, limit)
       const session = observed.session ?? observed.header
       return {
         sessionId,
+        source: kind,
         title: String(session?.title ?? session?.cwd ?? sessionId),
         cwd: session?.cwd,
         lastActivityAt: events.length ? Number(events[events.length - 1].time ?? 0) : 0,
@@ -162,7 +179,13 @@ export function createButlerTools(service: SuperagentService): any[] {
   const dispatch = defineTool({
     name: 'butler_dispatch',
     description:
-      'Route a user request to a dsh worker. First call WITHOUT decision to get the workspace and candidate sessions (with features). Then call again WITH decision to execute: reuse an existing session, create a new one, or ask the user (clarify). The Host validates the decision. Use a running worker when the task is a continuation; it queues the message. Optional watchdog {expectedMinutes, pollMinutes, quiet} sets how long the task may stay quiet before the butler is asked to check in; omitted means it is estimated from the task text. Do not use this for status questions.',
+      'Route a user request to a dsh worker. First call WITHOUT decision to get the workspace and candidate sessions (with features). Then call again WITH decision to execute. The Host validates it strictly and its error message names the keys you actually sent.\n\n'
+      + 'decision contract — the discriminator is `kind`, NOT `mode`:\n'
+      + '  {"kind":"reuse","sessionId":"session-…","reason":"why this one"}  — continue on an existing candidate; use `sessionId` (not `targetSessionId`)\n'
+      + '  {"kind":"new","cwd":"/abs/path","reason":"why new"}               — create a session; `cwd` is required and must be an absolute existing directory\n'
+      + '  {"kind":"clarify","reason":"what you need from the user"}         — ask the user instead of guessing\n'
+      + 'Minimum usable call: {"kind":"new","cwd":"/abs/path"} or {"kind":"reuse","sessionId":"session-…"}; `reason` is recommended on new/reuse.\n\n'
+      + 'Use a running worker when the task is a continuation; it queues the message. Optional watchdog {expectedMinutes, pollMinutes, quiet} sets how long the task may stay quiet before the butler is asked to check in; omitted means it is estimated from the task text. Do not use this for status questions.',
     parameters: {
       type: 'object',
       properties: {
@@ -171,7 +194,16 @@ export function createButlerTools(service: SuperagentService): any[] {
         cwd: { type: 'string' },
         decision: {
           type: 'object',
+          // 保持 additionalProperties: true 只为了兼容旧写法（mode/targetSessionId）——
+          // 服务端会归一化，但归一后仍按 kind 严格校验，不放松任何判定。
           additionalProperties: true,
+          properties: {
+            kind: { type: 'string', enum: ['new', 'reuse', 'clarify'] },
+            cwd: { type: 'string', description: 'kind=new 时必填，绝对路径' },
+            sessionId: { type: 'string', description: 'kind=reuse 时必填' },
+            reason: { type: 'string' },
+            projectKey: { type: 'string' },
+          },
         },
         watchdog: {
           type: 'object',

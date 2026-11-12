@@ -1,5 +1,7 @@
 # SuperAgent 管家 · 问题与优化清单
 
+> ⚠️ 本文件是仓库内副本，**由 `docs/dsh-superagent-butler-issues.md` 同步而来**；请改那一份，再整份覆盖这里，不要直接编辑本文，否则两份会漂移。
+
 > 最后更新：2026-11-12
 > 维护方式：增量维护。新问题先入 `📥 待处理`；修完只改状态、补备注，不删条目、不复用编号。
 
@@ -54,14 +56,14 @@
 | I-15 | 启动异常会拖垮整个插件 | ✅ 已修复 | P1 |
 | I-16 | 来源不可用无观测 | ✅ 已修复 | P2 |
 | I-17 | 「代码通过、真机没验」反复发生 | ✅ 已修复 | P1 |
-| I-18 | `butler_session_read` 读不了 claude/codex 内容 | ⏸️ 待决策 | P2 |
-| I-19 | watchdog 把「等审批」误判为停滞 | ⏸️ 待决策 | P1 |
-| I-20 | watchdog 不识别「疑似已完成」 | ⏸️ 待决策 | P1 |
-| I-21 | 派发不销账导致 watchdog 反复产生假唤醒 | ⏸️ 待决策 | P1 |
+| I-18 | `butler_session_read` 读不了 claude/codex 内容 | ✅ 已修复 | P2 |
+| I-19 | watchdog 把「等审批」误判为停滞 | ✅ 已修复 | P1 |
+| I-20 | watchdog 不识别「疑似已完成」 | ✅ 已修复 | P1 |
+| I-21 | 派发不销账导致 watchdog 反复产生假唤醒 | ✅ 已修复 | P1 |
 | I-22 | 改配置文件必须跨沙箱提权 | ⏸️ 待决策 | P1 |
 | I-23 | 老管家会话积压消息 | ⏸️ 待决策 | P2 |
-| I-28 | 工作完成或卡点结束后没人销账，派发一直挂着 | ⏸️ 待决策 | P1 |
-| I-29 | `butler_dispatch` 的决策字段名与工具说明不一致，传错时报错误导 | ⏸️ 待决策 | P2 |
+| I-28 | 工作完成或卡点结束后没人销账，派发一直挂着 | ✅ 已修复 | P1 |
+| I-29 | `butler_dispatch` 的决策字段名与工具说明不一致，传错时报错误导 | ✅ 已修复 | P2 |
 | I-24 | Claude 的 running 是推断值 | 🚫 不修 / 已知限制 | P2 |
 | I-25 | Codex 无法区分 root / 子会话 | 🚫 不修 / 已知限制 | P2 |
 | I-26 | 外部来源只读 | 🚫 不修 / 已知限制 | P2 |
@@ -78,33 +80,6 @@
 
 ## ⏸️ 待决策
 
-### I-18 `butler_session_read` 读不了 claude/codex 会话内容（B-4）
-- **状态**：⏸️ 待决策
-- **现象**：`butler_session_read` 对 claude 会话返回「session 不存在或不可读」。管家能看见「它在跑」，看不见「它在做什么」。原因：外部来源的 `readDigest` 已实现（设计 §9.4 里 claude/codex 为 true），但未接入管家读取工具。
-- **修复方法**：选项 (a) 接入，按 capabilities 判定，只读来源允许读 digest；(b) 不接，明确在工具返回里说明「该来源不支持读取内容」。建议 (a)。
-- **备注**：原 D-01；与 I-26 相关；2026-11-09 待拍板。
-
-### I-19 watchdog 把「等审批」误判为停滞
-- **状态**：⏸️ 待决策
-- **现象**：会话 `awaiting_approval` / `awaiting_question` 期间静止，watchdog 连续误报「N 分钟没有进展」（今天误报 2 次）。
-- **修复方法**：判定前排除这两种 hardStatus。
-- **备注**：原 D-02；与 I-21 同源（原 I-27 已并入）；2026-11-09。
-
-### I-20 watchdog 不识别「疑似已完成」
-- **状态**：⏸️ 待决策
-- **现象**：任务早已完成、目标会话 idle 且 `softStatus.next` 为空，watchdog 仍按「没进展」催办，产生大量假唤醒。
-- **修复方法**：该组合改为提示「要不要销账」而不是「没进展」；或对 `stage_end` 已报过且此后无变化的派发降低提醒频率。
-- **备注**：原 D-03；与 I-19 / I-21 同属 watchdog 假唤醒；2026-11-09。
-
-### I-21 派发不销账导致 watchdog 反复产生假唤醒
-- **状态**：⏸️ 待决策
-- **现象**：任务实际已完成（例如清单写入完成、文件已核对），但派发记录仍是 `delivered`，watchdog 每隔 pollMinutes 就唤醒管家一次。2026-11-09 当天产生 6+ 次误报，用户明确表达困扰；用户已多次人工销账（累计 5 条）。
-- **修复方法**：三个选项——
-  - (a) 识别「目标会话 idle + `softStatus.next` 为空 + 已有 `stage_end` 记录」时，改为提示「疑似完成，要不要销账」，而不是「没进展」；
-  - (b) 给派发加 TTL，超时自动转 `completed` 并记审计；
-  - (c) 保持现状 + 人工销账。
-- **备注**：原 D-04；原 I-27 与本条重复，已并入，I-27 作废不复用。与 I-19（watchdog 把等审批误判为停滞）同源，建议一起修。2026-11-09。
-
 ### I-22 改配置文件必须跨沙箱提权，路径不可靠
 - **状态**：⏸️ 待决策
 - **现象**：`~/.dsh/profiles/web/cordis.patch.yml` 在工作区外，worker 写入需 `danger-full-access`；**审批一挂起 turn 即挂起，任何打断都会让整个 turn 作废、改动丢失**——今天为改三行配置失败 3 次，最终由用户手改。
@@ -116,24 +91,6 @@
 - **现象**：`session-fc0f4e6f`（旧 ontology 项目）`queuedCount=31`、`session-6385aa8d` 为 9；都是 idle，队列不会自己消化。
 - **修复方法**：(a) 清空队列；(b) 归档/关闭这两个会话；(c) 保留观察。
 - **备注**：原 D-06；2026-11-09。
-
-### I-28 工作完成或卡点结束后没人销账，派发一直挂着
-- **状态**：⏸️ 待决策
-- **现象**：worker 已经把活干完（或卡点已 resolved），但 dispatch 记录仍停在 delivered，管家这边没有任何机制发现「这条可以关了」。实测实例：dsp_a88320b41f4e4d91（重写本清单那次派发）文档早已改完并核对过，状态至今仍是 delivered。三个后果：watchdog 继续按 pollMinutes 反复唤醒管家产生假「没进展」；inbox 里堆着一批看起来未完成的派发；管家回答「现在有什么任务」时会把已完成的算成进行中。
-- **修复方法**：三层，建议按 (1)→(2)→(3) 推进 ——
-  (1) **自动建议**：扫描时若某条 open dispatch 满足「目标会话 hardStatus=idle + softStatus.next 为空 + 该 dispatch 之后有过 stage_end 记录」，不擅自销账，而是生成一条**建议销账**提醒（带 dispatchId），用户点一下即关；管家也可在回复里主动问一句。
-  (2) **完成信号**：worker 已通过 butler_report_status 报完（next 空、无 blocker）时，把该事实记到 dispatch 上作为「疑似完成」依据，不靠推断。
-  (3) **TTL 兜底**：dispatch 加超时字段，超阈值且无活动的自动转 completed 并写审计（by=butler-auto），避免永久悬挂。
-- **备注**：与 I-19（watchdog 把等审批误判为停滞）、I-20（不识别疑似已完成）、I-21（派发不销账导致假唤醒）同源，建议一并设计。风险：销账会取消该派发待审计划并解除 plan gate，所以 (1) 必须保留人工确认，(3) 只适用于确认无待审计划的派发。2026-11-12 记录。
-
-### I-29 `butler_dispatch` 的决策字段名与工具说明不一致，传错时报错误导
-- **状态**：⏸️ 待决策
-- **现象**：调用 `butler_dispatch` 创建新会话时，按工具说明里「reuse / new / clarify」的措辞传 `{"mode": "new"}`，宿主连续 4 次返回 `{"kind":"clarify","reason":"target_ambiguous"}`，完全指不到真正原因。实际校验的字段是 **`kind`**（`service.ts:2566` 的 `if (decision.kind !== 'reuse') return { kind: 'clarify', reason: 'target_ambiguous' }`）。改用 `{"kind":"new","cwd":"..."}` 立即成功。新建会话还必须带 `cwd`（`service.ts:2538` 会 `canonicalPath(decision.cwd)` 并校验目录存在，缺失则报 `workspace_missing`）。
-- **修复方法**：三选一或组合 ——
-  (a) 工具说明里把字段名写明：`decision.kind = 'new' | 'reuse' | 'clarify'`，并给出最小可用示例（`{"kind":"new","cwd":"/abs/path"}`）；`new` 时 `cwd` 必填、`reason` 建议填，`reuse` 时用 `sessionId` 而非 `targetSessionId`（`service.ts:2568` 读的是 `decision.sessionId`）。
-  (b) `dispatchExecute` 入口做一次参数名兼容（`mode`/`targetSessionId` 映射到 `kind`/`sessionId`），让常见误传也能工作。
-  (c) `target_ambiguous` 的 message 里带上实际收到的 decision 键名，便于自我纠正。
-- **备注**：2026-11-12 实测记录，本会话（session-5c867b97）创建时踩到。与 I-28 同批发现。建议至少做 (a)，成本最低且能防止后续 agent 重复踩。
 
 ## ✅ 已修复
 
@@ -239,6 +196,54 @@
 - **修复方法**：新增 `smoke:cold-start`（真服务冷启动）与真机验收要求（P3、B-1 均按「真 Chrome + 不发消息」验收）；`check-client` 的假 React 渲染只作为补充，不作为验收依据。
 - **备注**：该条是流程缓解，不是单点代码修复；2026-11-09。
 
+### I-18 `butler_session_read` 读不了 claude/codex 会话内容（B-4）
+- **状态**：✅ 已修复
+- **现象**：`butler_session_read` 对 claude 会话返回「session 不存在或不可读」。管家能看见「它在跑」，看不见「它在做什么」，而且这句错误把「不存在」和「不支持读」混成一件事，管家无从判断下一步。
+- **修复方法**：按选项 (a) 重写工具的读取路径（`src/butler-tools.ts` 的 `butler_session_read.execute`）：
+  1. 先用 `service.sourceKindOf(sessionId)` 定位来源，再 `service.sources.get(kind)` 拿该来源；
+  2. 按 `capabilities.readEvents / readDigest` 判定能不能读内容；
+  3. **三种结果可区分**：`{error:'session_not_found'}` / `{error:'source_read_unsupported', source}` / 正常内容（带 `source` 字段）；
+  4. dsh 仍走原来的 `service.source.observe()`（行为不变），来宾来源回退到它自己的 `observe()`（实测返回同形状 `{header, events}`）。
+- **备注**：单测 3 条（`test/unit/butler-tools.test.ts`：能读 digest / 不支持读 → `source_read_unsupported` / 不存在 → `session_not_found`）。2026-11-12。
+
+### I-19 watchdog 把「等审批」误判为停滞
+- **状态**：✅ 已修复
+- **现象**：会话 `awaiting_approval` / `awaiting_answer` 期间静止，watchdog 连续误报「N 分钟没有进展」。根因：`detectProgress` 只拿到 `lastActivityAt`，**根本不知道会话在等人**。
+- **修复方法**：`src/progress.ts` 的 `DetectProgressInput` 新增 `hardStatus`，`src/service.ts` 在调用处透传 `this.hardStatusFor(sessionId)`；`awaiting_approval` / `awaiting_answer` 期间不产生 watchdog 事件（anchor 也不动，避免人一处理完就立刻炸一条）。`running` / `idle` 行为不变。
+- **备注**：单测 1 条覆盖 4 种硬状态（`test/unit/progress.test.ts`）。**反向验证**：把排除条件改成 `const waitingHuman = false` → 该用例变红（298/299），还原后 299 全绿。2026-11-12。
+
+### I-20 watchdog 不识别「疑似已完成」
+- **状态**：✅ 已修复
+- **现象**：任务早已干完、会话 idle、`softStatus.next` 为空，watchdog 仍问「做到哪了」，产生假唤醒。
+- **修复方法**：两层。
+  1. **换说法**：`dispatch.suspectDoneAt` 有值或 `cursor.stageEnds ≥ 1` 时，watchdog 文案从「N 分钟没有进展」改成「看起来已经干完了，要不要销账」，引导人做收尾而不是继续追问。
+  2. **降频率**：`stageEnds ≥ 1` 的派发把巡检间隔退避为 2 倍（`pollMs * 2`），避免干完不收尾的派发被反复打扰。
+- **备注**：单测 1 条（疑似完成时标题含「销账」不含「没有进展」；退避后 15 分钟不报、25 分钟报）。2026-11-12。
+
+### I-21 派发不销账导致 watchdog 反复产生假唤醒
+- **状态**：✅ 已修复
+- **现象**：任务实际已完成，但派发记录仍是 `delivered`，watchdog 每隔 `pollMinutes` 唤醒一次；2026-11-09 当天产生 6+ 次误报。
+- **修复方法**：与 I-28 同源，按三层落地（(1) 建议销账 + (2) 完成信号 + (3) TTL），并叠加 P2 的 Thread：`markDispatch(completed)` 现在会连带 `closeThread(done)`，活关掉后该 thread 的卡点统一归档，watchdog 也不再巡检已结束的派发。
+- **备注**：见 I-28 的三层说明与验证；收敛后「假唤醒」的触发面从「任意未销账派发」缩到「仍在跑或仍挂着真实卡点的派发」。2026-11-12。
+
+### I-28 工作完成或卡点结束后没人销账，派发一直挂着
+- **状态**：✅ 已修复
+- **现象**：worker 干完活（或卡点已 resolved），dispatch 仍停在 `delivered`，管家没有任何机制发现「这条可以关了」。实测 `dsp_a88320b41f4e4d91` 文档早已改完，状态至今仍是 delivered。
+- **修复方法**：按清单建议 (1)→(2)→(3) 三层全部落地：
+  1. **自动建议销账（不擅自销账）**：新增卡点类型 `settle_suggest`。判定条件「`hardStatus=idle` + `softStatus.next` 为空 + 有完成信号（`suspectDoneAt`）或 `stageEnds≥1` + 派发仍 open」，在 `src/service.ts` 的 `settleSuggestBlocker()` 里产出；提醒卡片**复用现有 `dispatch_completed` 按钮**（客户端带 `notice.dispatchId` 调 `dispatch_mark`），并另有「还在干，继续观察」→ dismiss，**冷却 6 小时**（`settleSuggest.cooldownMs`）不再提。
+  2. **完成信号（事实而非推断）**：`Dispatch` 新增 `suspectDoneAt` / `suspectDoneReason: 'report'|'stage_end'`。worker 经 `butler_report_status` 报完（done 非空、next 空、无 blocker）时记录 `'report'`；检测到阶段结束时记录 `'stage_end'`；`markDispatch` 时清空。
+  3. **TTL 兜底**：`Config.settleTtl`（默认 **`enabled:false`**、`minutes:1440`）。仅当「超时 + 无活动 + **无待审计划** + 无其它 open 卡点」时自动转 completed，`by='butler-auto'`，并写审计 `action:'settle_ttl'`。
+- **备注**：集成用例 3 条（建议产出条件 / 卡片带 dispatchId 且点「确认完成」真的销账并连带关 thread / 忽略后冷却期内不再建议）+ 单测覆盖文案。**反向验证**：去掉「只在 idle 时建议」守卫 → 该用例变红（298/299），还原后 299 全绿。TTL 默认关闭，默认值待用户拍板。2026-11-12。
+
+### I-29 `butler_dispatch` 的决策字段名与工具说明不一致，传错时报错误导
+- **状态**：✅ 已修复
+- **现象**：按工具说明「reuse / new / clarify」的措辞传 `{"mode":"new"}`，宿主连续 4 次返回 `{"kind":"clarify","reason":"target_ambiguous"}`，且**没有 message**，完全指不到真正原因；实际校验的是 `kind`（`service.ts` 的 `dispatchExecute`），新建会话还必须带 `cwd`。
+- **修复方法**：三件一起做。
+  - **(a) 说明写清契约**：`butler_dispatch` 的 description 写明 `decision.kind = 'new'|'reuse'|'clarify'`，给出最小可用示例（`{"kind":"new","cwd":"/abs/path"}`、`{"kind":"reuse","sessionId":"session-…"}`），并点明 reuse 用 `sessionId` 而非 `targetSessionId`、new 时 `cwd` 必填；`decision` 的 schema 也补了字段说明。
+  - **(c) 报错可自我纠正**：新增 `normalizeDecision()`，非法 kind / 缺 cwd / 缺 sessionId 时返回 `reason:'invalid_decision'`，message 里带上**实际收到的键名**和最小示例；两处 `target_ambiguous` 也补了 message（分别说明「只接受 reuse/new」和「sessionId 不在候选里，请先拿候选」）。
+  - **(b) 兼容旧写法**：`mode`→`kind`、`targetSessionId`→`sessionId` 归一化后**仍走原严格校验**，不放松任何判定。
+- **备注**：单测 1 条（说明含契约与示例）+ 集成 2 条（旧写法 `mode`+`targetSessionId` 成功 / 写错字段时 message 含实际键名与示例）。2026-11-12。
+
 ## 🚫 不修 / 已知限制
 
 ### I-24 Claude 的 running 是推断值
@@ -281,3 +286,4 @@
 | 2026-11-09 | 合并重复条目：I-27 并入 I-21，I-27 作废不复用；正文/索引同步为 26 条，最大编号 I-26 |
 | 2026-11-12 | 新增 I-28（工作完成或卡点结束后没人销账，派发一直挂着，⏸️ 待决策 / P1）；清单共 27 条 |
 | 2026-11-12 | 新增 I-29（`butler_dispatch` 决策字段名与工具说明不一致，⏸️ 待决策 / P2）；「使用说明」编号表述改为不写死具体数字；清单共 28 条 |
+| 2026-11-12 | A 组修复完成：I-18/I-19/I-20/I-21/I-28/I-29 → ✅；I-22/I-23（B 组）保持待决策。清单仍 28 条 |

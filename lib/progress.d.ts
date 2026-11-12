@@ -42,6 +42,11 @@ export interface DetectProgressInput {
         at: number;
         kind: string;
     };
+    /**
+     * 会话硬状态（I-19）：`awaiting_approval` / `awaiting_answer` 期间人是瓶颈，
+     * 会话本来就是静的，不能算「没进展」。
+     */
+    hardStatus?: string;
     config: Config;
     now: number;
 }

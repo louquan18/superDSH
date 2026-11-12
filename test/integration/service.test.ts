@@ -2444,3 +2444,207 @@ test('P2 thread：长期不动的活自动标 abandoned，但绝不标 done', as
   assert.equal(after.closedBy, 'auto_ttl')
   assert.notEqual(after.state, 'done', '自动流程永远不许把活标成已完成')
 })
+
+// ---------------------------------------------------------------- I-28 建议销账
+
+test('I-28(1)：空闲 + 有完成信号 + next 为空 → 产出建议销账；不满足就不产出', async () => {
+  const { harness, cwd } = await boot()
+  await withButler(harness, cwd)
+  harness.addAgent('worker-s1', cwd)
+  await harness.service.listSessions(true)
+  await harness.service.dispatchExecute(
+    { kind: 'reuse', sessionId: 'worker-s1', reason: 't' },
+    '把 util 的 bug 修了',
+  )
+  const dispatch = harness.service.store.currentDispatch('worker-s1')!
+  const service: any = harness.service
+  const soft = {
+    goal: '修 bug',
+    done: ['改完了'],
+    next: [],
+    blockers: [],
+    decisions: [],
+    reportedAt: Date.now(),
+    source: 'tool',
+  }
+
+  // 没有完成信号、没有阶段结束 → 不建议
+  assert.equal(
+    service.settleSuggestBlocker({
+      sessionId: 'worker-s1',
+      sessionTitle: 'worker-s1',
+      hardStatus: 'idle',
+      dispatch,
+      soft,
+    }),
+    undefined,
+  )
+
+  // 记上「完成信号」（这是事实，不是推断）
+  dispatch.suspectDoneAt = Date.now() - 60_000
+  dispatch.suspectDoneReason = 'report'
+  await harness.service.store.putDispatch(dispatch)
+
+  const suggested = service.settleSuggestBlocker({
+    sessionId: 'worker-s1',
+    sessionTitle: 'worker-s1',
+    hardStatus: 'idle',
+    dispatch,
+    soft,
+  })
+  assert.ok(suggested, '空闲 + 有完成信号就该建议')
+  assert.equal(suggested.kind, 'settle_suggest')
+  assert.equal((suggested.evidence as any).dispatchId, dispatch.id)
+
+  // 还在跑 → 不打扰
+  assert.equal(
+    service.settleSuggestBlocker({
+      sessionId: 'worker-s1',
+      sessionTitle: 'worker-s1',
+      hardStatus: 'running',
+      dispatch,
+      soft,
+    }),
+    undefined,
+  )
+  // worker 还有下一步 → 不催销账
+  assert.equal(
+    service.settleSuggestBlocker({
+      sessionId: 'worker-s1',
+      sessionTitle: 'worker-s1',
+      hardStatus: 'idle',
+      dispatch,
+      soft: { ...soft, next: ['还要跑测试'] },
+    }),
+    undefined,
+  )
+})
+
+test('I-28(1)：建议销账卡片带 dispatchId 和两个按钮；点「确认完成」= 人工销账', async () => {
+  const { harness, cwd } = await boot()
+  await withButler(harness, cwd)
+  harness.addAgent('worker-s2', cwd)
+  await harness.service.listSessions(true)
+  await harness.service.dispatchExecute(
+    { kind: 'reuse', sessionId: 'worker-s2', reason: 't' },
+    '干完但没人收尾的活',
+  )
+  const dispatch = harness.service.store.currentDispatch('worker-s2')!
+  const threadId = dispatch.threadId!
+  await harness.service.store.putBlocker({
+    id: 'blk_suggest',
+    sessionId: 'worker-s2',
+    threadId,
+    kind: 'settle_suggest',
+    severity: 'info',
+    status: 'notified',
+    signature: `settle:${dispatch.id}`,
+    summary: '看起来已经干完，要不要销账？',
+    neededAction: '确认无误就点「确认完成，销账」',
+    evidence: { dispatchId: dispatch.id },
+    detectedAt: Date.now(),
+    lastSeenAt: Date.now(),
+    reminderCount: 1,
+  } as any)
+
+  const snapshot = await harness.service.snapshot()
+  const notice = (snapshot.blockerNotices ?? []).find(
+    (item: any) => item.blockerId === 'blk_suggest',
+  ) as any
+  assert.ok(notice, '建议销账必须出现在收件箱')
+  assert.equal(notice.dispatchId, dispatch.id, '按钮要靠 dispatchId 落到具体派发上')
+  assert.ok(
+    (notice.actions ?? []).some((action: any) => action.verb === 'dispatch_completed'),
+    '要有「确认完成」按钮',
+  )
+
+  // 点「确认完成」的服务端等价动作
+  const result = await harness.service.resolveBlocker('blk_suggest', 'approve', undefined, 'user')
+  assert.notEqual(result?.ok, false, `销账失败：${JSON.stringify(result)}`)
+  assert.equal(harness.service.store.getDispatch(dispatch.id)!.status, 'completed')
+  assert.equal(harness.service.store.getBlocker('blk_suggest')!.status, 'auto_resolved')
+  assert.equal(harness.service.store.getThread(threadId)!.state, 'done', '销账连带到活')
+})
+
+test('I-28(1)：点「继续观察」后冷却期内不再建议', async () => {
+  const { harness, cwd } = await boot()
+  await withButler(harness, cwd)
+  harness.addAgent('worker-s3', cwd)
+  await harness.service.listSessions(true)
+  await harness.service.dispatchExecute(
+    { kind: 'reuse', sessionId: 'worker-s3', reason: 't' },
+    '再观察一下的活',
+  )
+  const dispatch = harness.service.store.currentDispatch('worker-s3')!
+  dispatch.suspectDoneAt = Date.now()
+  dispatch.suspectDoneReason = 'report'
+  await harness.service.store.putDispatch(dispatch)
+  await harness.service.store.putBlocker({
+    id: 'blk_suggest3',
+    sessionId: 'worker-s3',
+    kind: 'settle_suggest',
+    severity: 'info',
+    status: 'notified',
+    signature: `settle:${dispatch.id}`,
+    summary: '要不要销账？',
+    neededAction: '确认完成',
+    evidence: { dispatchId: dispatch.id },
+    detectedAt: Date.now(),
+    lastSeenAt: Date.now(),
+    reminderCount: 1,
+  } as any)
+
+  const dismissed = await harness.service.resolveBlocker('blk_suggest3', 'dismiss', undefined, 'user')
+  assert.equal(dismissed.ok, true)
+
+  const again = (harness.service as any).settleSuggestBlocker({
+    sessionId: 'worker-s3',
+    sessionTitle: 'worker-s3',
+    hardStatus: 'idle',
+    dispatch,
+    soft: {
+      goal: 'x',
+      done: ['y'],
+      next: [],
+      blockers: [],
+      decisions: [],
+      reportedAt: Date.now(),
+      source: 'tool',
+    },
+  })
+  assert.equal(again, undefined, '忽略后冷却期内不能反复骚扰')
+})
+
+// ---------------------------------------------------------------- I-29 决策字段
+
+test('I-29：旧写法 mode / targetSessionId 被兼容，不再报 target_ambiguous', async () => {
+  const { harness, cwd } = await boot()
+  await withButler(harness, cwd)
+  harness.addAgent('worker-d1', cwd)
+  await harness.service.listSessions(true)
+
+  // 历史踩坑写法：mode + targetSessionId（真实报错是 target_ambiguous，且没有任何提示）
+  const result: any = await harness.service.dispatchExecute(
+    { mode: 'reuse', targetSessionId: 'worker-d1', reason: '旧写法' } as any,
+    '用旧字段名派活',
+  )
+  assert.notEqual(result?.kind, 'clarify', `不该再要求澄清：${JSON.stringify(result)}`)
+  assert.ok(harness.service.store.currentDispatch('worker-d1'))
+})
+
+test('I-29：字段写错时报错要带上实际收到的键名，便于自我纠正', async () => {
+  const { harness, cwd } = await boot()
+  await withButler(harness, cwd)
+  harness.addAgent('worker-d2', cwd)
+  await harness.service.listSessions(true)
+
+  const result: any = await harness.service.dispatchExecute(
+    { decision: 'new', cwd } as any,
+    '字段写错的派发',
+  )
+  assert.equal(result?.kind, 'clarify')
+  assert.equal(result?.reason, 'invalid_decision')
+  assert.match(String(result?.message), /kind/)
+  assert.match(String(result?.message), /decision/, '要说出实际收到了哪些键')
+  assert.match(String(result?.message), /"kind":"new"/, '要给最小可用示例')
+})

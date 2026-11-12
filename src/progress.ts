@@ -52,6 +52,11 @@ export interface DetectProgressInput {
   resolved?: ResolvedBlockerRef[]
   /** 最近一次 turn 结束（runtime.lastTurnEnd）。 */
   lastTurnEnd?: { at: number; kind: string }
+  /**
+   * 会话硬状态（I-19）：`awaiting_approval` / `awaiting_answer` 期间人是瓶颈，
+   * 会话本来就是静的，不能算「没进展」。
+   */
+  hardStatus?: string
   config: Config
   now: number
 }
@@ -201,24 +206,41 @@ export function detectProgress(input: DetectProgressInput): ProgressEvent[] {
   // 「无进展」取「上报」与「会话活动」中较新的那个：worker 闷头做真机验证、
   // 一直有事件但没调 report_status 时不算停滞；彻底不动（既无活动也无上报）才报。
   const watchdog = dispatch.watchdog
-  if (config.watchdog.enabled && watchdog && !watchdog.quiet && isOpenDispatch(dispatch)) {
+  // I-19：等审批 / 等回答期间会话静止是正常的，不产生停滞提醒。
+  const waitingHuman = input.hardStatus === 'awaiting_approval' || input.hardStatus === 'awaiting_answer'
+  if (
+    config.watchdog.enabled &&
+    watchdog &&
+    !watchdog.quiet &&
+    !waitingHuman &&
+    isOpenDispatch(dispatch)
+  ) {
     const anchor = Math.max(
       cursor.lastProgressAt ?? 0,
       input.lastActivityAt ?? 0,
       dispatch.acceptedAt ?? dispatch.createdAt,
     )
-    const pollMs = Math.max(1, Math.round(watchdog.pollMinutes)) * 60_000
+    // I-20：已经报过一次「阶段结束」的派发，说明它大概率干完了，只是没人收尾。
+    // 这种情况下把巡检间隔退避到 2 倍，降低「没进展」的噪音频率。
+    const backoff = (cursor.stageEnds ?? 0) >= 1 ? 2 : 1
+    const pollMs = Math.max(1, Math.round(watchdog.pollMinutes)) * 60_000 * backoff
     const elapsed = now - anchor
     if (elapsed >= pollMs) {
       const signature = watchdogSignature(anchor, elapsed, pollMs)
       if (!isNotified(cursor, signature)) {
         const minutes = Math.max(1, Math.round(elapsed / 60_000))
+        const suspect = Boolean(dispatch.suspectDoneAt) || (cursor.stageEnds ?? 0) >= 1
         events.push({
           kind: 'watchdog',
           signatures: [signature],
           category: 'dispatch',
-          title: `${title}：${minutes} 分钟没有进展`,
-          detail: '要不要问一下它现在做到哪了？',
+          // I-20：疑似完成时别再问「做到哪了」，直接问要不要销账。
+          title: suspect
+            ? `${title}：看起来已经干完了，要不要销账`
+            : `${title}：${minutes} 分钟没有进展`,
+          detail: suspect
+            ? 'worker 报过完成或阶段已结束；确认无误就点「标记完成」，还在干活就忽略。'
+            : '要不要问一下它现在做到哪了？',
           real: false,
         })
       }

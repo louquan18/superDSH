@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-superagent-butler",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "description": "SuperAgent 管家：本机 dsh session 的只读管家、卡点检测、计划审查、派发与审批代理",
   "type": "module",
