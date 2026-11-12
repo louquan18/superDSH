@@ -2,7 +2,9 @@
 
 本机 dsh session 的**只读管家**：帮你盯着所有 session 的进度和卡点、审查 worker 交上来的计划、派活、代批低风险操作，所有高风险动作都转回给你。
 
-设计规格见 [`../docs/dsh-superagent-butler-design.md`](../docs/dsh-superagent-butler-design.md)（下称"设计"）。本文件只写**怎么用、怎么验证、哪些还没验证**。
+设计规格见 [`docs/dsh-superagent-butler-design.md`](docs/dsh-superagent-butler-design.md)（下称"设计"）。本文件只写**怎么用、怎么验证、哪些还没验证**。
+
+配套文档：[问题与优化清单](docs/dsh-superagent-butler-issues.md) · [Backlog](docs/dsh-superagent-butler-backlog.md) · [二期方案](docs/dsh-superagent-butler-phase2-plan.md) · [对话内提醒改造方案](docs/dsh-superagent-butler-chat-actions-plan.md)
 
 ## 一期做了什么
 
@@ -50,7 +52,8 @@
 ```bash
 # 装进现有的 web profile（写 ~/.dsh，需要该目录的写权限）
 # 注意 -w：profile 目录自带 pnpm-workspace.yaml，不加会被 pnpm 当成 workspace root 拒绝
-dsh plugin --profile web add -w link:/Users/quanlou/Documents/deepseek-harness/default-workspace/dsh-superagent-butler
+# 在仓库根目录执行：$PWD 就是本插件的绝对路径
+dsh plugin --profile web add -w "link:$PWD"
 
 # 重启 dsh web 后生效（插件在启动时组装，热装不会进已在跑的进程）
 dsh web
@@ -76,7 +79,7 @@ bundle patch 会插入两项：`superagent-butler`（Host 服务 + 面板）和 
 ```bash
 cd dsh-superagent-butler
 npm run build          # Host + Client 编译到 lib/
-npm test               # 141 个单测/集成测试（node:test，无外部依赖）
+npm test               # 261 个单测/集成测试（node:test，无外部依赖）
 npm run check:client   # 校验 client 产物的装载协议、6 个挂载点、提醒 Definition 的匹配规则
 npm run check:notice   # 用假 React 真渲染一遍提醒卡片 / 待处理条 / 只读面板，并点一次按钮验证动作链路
 npm run verify         # build + check:client + check:notice + test
@@ -114,7 +117,7 @@ node scripts/verify-web.mjs http://127.0.0.1:3081 "<启动日志里的 token>"
 
 - 门禁六种组合、计划批准前后、计划外转审批后再放行、卡点确认下代批与拒绝、dispatch 完成后解除门禁 —— `test/integration/service.test.ts`。
 - 里程碑提醒去重、完成时关闭 dispatch、手动 session 不推送 —— 同上。
-- 路由候选过滤与 Host 校验、状态推导、卡点阈值、风险分级、计划 scope 匹配、存储 schema —— `test/unit/*.test.ts`（140 个）。
+- 路由候选过滤与 Host 校验、状态推导、卡点阈值、风险分级、计划 scope 匹配、存储 schema —— `test/unit/*.test.ts`（202 个）。
 - HTTP 路由：`GET /api/superagent/state`、SSE 首帧、`POST /api/superagent/action` 的各 action 及其错误分支。
 - 重启后管家 session 复用同一条记录（`ensure_butler` 返回同一个 sessionId），审计里有 `recovery/startup`。
 
