@@ -4,7 +4,7 @@
 
 设计规格见 [`docs/dsh-superagent-butler-design.md`](docs/dsh-superagent-butler-design.md)（下称"设计"）。本文件只写**怎么用、怎么验证、哪些还没验证**。
 
-配套文档：[问题与优化清单](docs/dsh-superagent-butler-issues.md) · [Backlog](docs/dsh-superagent-butler-backlog.md) · [二期方案](docs/dsh-superagent-butler-phase2-plan.md) · [对话内提醒改造方案](docs/dsh-superagent-butler-chat-actions-plan.md)
+配套文档：[问题与优化清单](docs/dsh-superagent-butler-issues.md) · [Backlog](docs/dsh-superagent-butler-backlog.md) · [二期方案](docs/dsh-superagent-butler-phase2-plan.md) · [对话内提醒改造方案](docs/dsh-superagent-butler-chat-actions-plan.md) · [三项改动开发计划](docs/dsh-superagent-butler-optimization-plan.md)
 
 ## 一期做了什么
 
