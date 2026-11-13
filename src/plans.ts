@@ -22,6 +22,34 @@ export interface PlanMatch {
   score: number
 }
 
+/**
+ * 把计划 scope 里的一条路径规则归一化成「相对 projectRoot」的 glob（I-35）。
+ *
+ * 历史原因，worker 提交的 scope 常常是**绝对路径**（`/Users/.../src/main/...`），
+ * 而匹配时目标被转成了相对路径 `src/main/...`。直接拿绝对 pattern 去 glob 相对字符串
+ * 恒不命中，于是「计划内的文件」被判成「计划外写操作」。
+ *
+ * 规则：绝对路径先 `toRelative` 到项目根；落在项目根外（`..` 开头）的规则直接忽略，
+ * 因为它本来就不该匹配本项目内的文件。相对规则原样保留。
+ */
+export function scopePatternToRelative(
+  projectRoot: string,
+  pattern: string,
+): string | undefined {
+  const raw = String(pattern ?? '').trim()
+  if (!raw) return undefined
+  if (!path.isAbsolute(raw)) return normGlob(raw)
+  const rel = toRelative(projectRoot, raw)
+  if (!rel || rel === '..' || rel.startsWith('../') || path.isAbsolute(rel)) return undefined
+  return normGlob(rel)
+}
+
+/** 去掉 `./` 前缀、统一分隔符，避免同一规则因为写法不同而漏匹配。 */
+function normGlob(pattern: string): string {
+  const unified = pattern.replace(/\\/g, '/').replace(/^\.\//, '')
+  return unified === '.' ? '' : unified
+}
+
 export function matchPlanPath(
   plan: Plan | undefined,
   projectRoot: string,
@@ -36,12 +64,39 @@ export function matchPlanPath(
   let best: PlanMatch | undefined
   for (const item of scopeItems(plan)) {
     for (const pattern of item.paths ?? []) {
-      if (!matchGlob(pattern, rel)) continue
-      const score = pattern.replace(/\*/g, '').length
+      // I-35：先把 scope 规则归一化到相对路径，再和目标比。
+      const normalized = scopePatternToRelative(projectRoot, pattern)
+      if (!normalized) continue
+      if (!matchGlob(normalized, rel)) continue
+      const score = normalized.replace(/\*/g, '').length
       if (!best || score > best.score) best = { item, score }
     }
   }
   return best
+}
+
+/**
+ * 命中失败时的可解释信息（I-35 的 (b)）：
+ * 把「目标相对路径」和「计划里实际声明了哪些规则」一起给出来，
+ * 而不是只留一句「计划外写操作」让人无从判断。
+ */
+export function explainPlanMiss(
+  plan: Plan | undefined,
+  projectRoot: string,
+  targetPath: string,
+): { relPath: string; patterns: string[] } {
+  const absolute = path.isAbsolute(targetPath)
+    ? targetPath
+    : path.resolve(projectRoot, targetPath)
+  const relPath = toRelative(projectRoot, absolute)
+  const patterns: string[] = []
+  for (const item of scopeItems(plan)) {
+    for (const pattern of item.paths ?? []) {
+      const normalized = scopePatternToRelative(projectRoot, pattern)
+      patterns.push(normalized ? `${pattern}${normalized !== pattern ? ` → ${normalized}` : ''}` : `${pattern}（项目外，已忽略）`)
+    }
+  }
+  return { relPath, patterns }
 }
 
 export function matchPlanCommand(

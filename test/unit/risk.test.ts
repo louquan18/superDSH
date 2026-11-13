@@ -238,3 +238,81 @@ test('isMutating and isReadOnly classify tool names', () => {
   assert.equal(isReadOnly('read'), true)
   assert.equal(isReadOnly('bash'), false)
 })
+
+// ---------------------------------------------------------------- I-35 计划内写入
+
+test('I-35：已批准计划（绝对 scope）+ 不带 sandbox_permissions 的 edit → 计划内，低风险', () => {
+  const planReview = {
+    ...planReviewNoPlan,
+    plan: makePlan([
+      {
+        id: 'backend',
+        description: 'PageServiceImpl',
+        paths: [
+          '/proj/gcloud/business-analysis/src/main/java/com/proj/service/impl/PageServiceImpl.java',
+        ],
+      },
+    ]),
+  } as RiskContext
+
+  const verdict = classifyTool(
+    'edit',
+    {
+      file_path:
+        '/proj/gcloud/business-analysis/src/main/java/com/proj/service/impl/PageServiceImpl.java',
+      old_string: 'a',
+      new_string: 'b',
+    },
+    planReview,
+  )
+  assert.equal(verdict.risk, 'low', `计划内文件不该被判计划外：${String(verdict.reason)}`)
+})
+
+test('I-35：真·计划外写入仍要拦成高风险，并在原因里列出计划规则', () => {
+  const planReview = {
+    ...planReviewNoPlan,
+    plan: makePlan([
+      { id: 'backend', description: 'only src', paths: ['/proj/gcloud/src/**'] },
+    ]),
+  } as RiskContext
+
+  const verdict = classifyTool(
+    'edit',
+    { file_path: '/proj/gcloud/docs/readme.md', old_string: 'a', new_string: 'b' },
+    planReview,
+  )
+  assert.equal(verdict.risk, 'high', '不能为了修误判而放过计划外写入')
+  assert.match(String(verdict.reason), /计划外写操作/)
+  assert.match(String(verdict.reason), /计划规则/, '要能看出计划里到底声明了什么')
+})
+
+// ---------------------------------------------------------------- I-31 MCP 分级
+
+test('I-31：MCP 只读方法自动放行，会变状态的方法需要审批', () => {
+  const plan = { ...planReviewNoPlan } as RiskContext
+  for (const method of ['take_snapshot', 'list_pages', 'take_screenshot']) {
+    const verdict = classifyTool(`mcp__chrome-devtools-mcp__${method}`, {}, plan)
+    assert.equal(verdict.risk, 'low', `${method} 是只读，应自动放行`)
+    assert.match(String(verdict.reason), /MCP 只读/)
+  }
+  for (const method of ['click', 'fill', 'navigate_page', 'upload_file']) {
+    const verdict = classifyTool(`mcp__chrome-devtools-mcp__${method}`, {}, plan)
+    assert.equal(verdict.risk, 'high', `${method} 会改变状态，必须审批`)
+  }
+})
+
+test('I-31：evaluate_script 能执行任意 JS，明确不算只读', () => {
+  const verdict = classifyTool(
+    'mcp__chrome-devtools-mcp__evaluate_script',
+    { function: '() => fetch("http://x")' },
+    planReviewNoPlan,
+  )
+  assert.equal(verdict.risk, 'high', '任意 JS 可读写页面、可发请求，不能自动放行')
+})
+
+test('I-31：表里没有的 MCP 方法回落到「要人确认」，不默认放行', () => {
+  const verdict = classifyTool('mcp__some-server__totally_new_method', {}, planReviewNoPlan)
+  assert.equal(verdict.risk, 'unknown')
+  assert.match(String(verdict.reason), /未知 MCP 方法/)
+  assert.match(String(verdict.reason), /some-server\.totally_new_method/)
+})

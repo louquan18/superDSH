@@ -142,6 +142,9 @@ export function detectBlockers(ctx: BlockerContext): DetectedBlocker[] {
       neededAction: '批准、提修改意见或驳回',
       evidence: {
         planId: plan.id,
+        planTitle: plan.title,
+        // I-33：卡片上一眼可见「几条计划、几条路径」
+        planStats: planSummary(plan),
         dispatchId: plan.dispatchId,
         title: plan.title,
         planSummary: planSummary(plan),
@@ -421,6 +424,8 @@ export function noticeActionsFor(
         requiresText: true,
         placeholder: '驳回原因（必填）',
       })
+      // I-33：不新造通道，只加一个只读展开入口；正文按需拉，不塞进每次快照轮询。
+      actions.push({ verb: 'open_plan', label: '查看完整方案' })
       break
     case 'question':
     case 'decision':
@@ -473,6 +478,11 @@ export function buildBlockerNotice(
       : blocker.sessionId.slice(0, 8)
   const label = NOTICE_KIND_LABEL[blocker.kind] ?? blocker.kind
   const evidence = blocker.evidence ?? {}
+  // I-33：计划卡片要能一眼看出「几件事、几个文件」，而不是只有一段正文。
+  const planStats =
+    blocker.kind === 'plan_review' && typeof evidence.planStats === 'string'
+      ? String(evidence.planStats)
+      : ''
   const detailSource =
     typeof evidence.argsSummary === 'string' && evidence.argsSummary.length > 0
       ? evidence.argsSummary
@@ -495,7 +505,7 @@ export function buildBlockerNotice(
     source: blocker.source,
     sessionTitle,
     title: `${sessionTitle} · ${label}`,
-    detail: truncate(firstLine(detailSource, 240), 240),
+    detail: truncate(planStats ? `${planStats}｜${firstLine(detailSource, 200)}` : firstLine(detailSource, 240), 240),
     neededAction: blocker.neededAction,
     blockerId: blocker.id,
     planId: blocker.relatedPlanId,

@@ -29,6 +29,20 @@ export declare class Store {
      */
     listProgressNotices(): ProgressNoticeRecord[];
     saveProgressNotices(items: ProgressNoticeRecord[]): Promise<void>;
+    /**
+     * 待投递的提醒队列（I-34）。
+     *
+     * 存在 `meta` 表的 `pendingNotices` 键下（不新增表 = 不动 STORAGE_SPEC 版本）。
+     * 管家离线时提醒进这里；进程重启后从存储重建，不再靠内存。
+     */
+    listPendingNotices(): Array<{
+        butlerSessionId: string;
+        payload: any;
+    }>;
+    savePendingNotices(items: Array<{
+        butlerSessionId: string;
+        payload: any;
+    }>): Promise<void>;
     listProjects(): Project[];
     getProject(key: string): Project | undefined;
     putProject(project: Project): Promise<void>;

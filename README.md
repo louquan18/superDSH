@@ -233,6 +233,18 @@ thread:
 
 防回归：`npm run smoke:upgrade` 把**真实存储目录的副本**放进隔离 home，用当前代码冷启动后逐表核对 counts。反向验证过——把 `compatibleVersions` 删掉，这个冒烟会红（`sessions 84 → 0`）。
 
+### MCP 工具分级与计划卡片（A 组第二轮）
+
+- **MCP 工具按方法分级**（不再整批判「未知」）：只读方法（`take_snapshot` / `list_pages` / `take_screenshot` / `list_console_messages` / `list_network_requests` …）自动放行；会改状态的方法（`click` / `fill` / `navigate_page` / `evaluate_script` …）需审批；**表里没有的方法仍回落到「要人确认」**。`evaluate_script` 能执行任意 JS，**不算只读**。
+- **同类批一次**：同会话、同 `server.method` 批准过一次后不再逐次问（依据已落盘的审批记录，重启仍有效），放行时写审计 `mcp_batch_allow`。
+
+```yaml
+mcp:
+  batchApprove: true    # false = 每次都要批
+```
+
+- **计划进对话**：待审计划的卡片上直接有「批准 / 提修改意见 / 驳回 / 查看完整方案」，正文带「几条计划、几条路径」和方案摘要；点「查看完整方案」才按需拉全文（不塞进每 2 秒的快照轮询）。`gate_confirm` 下不阻塞，但通知会明确写「本次不阻塞」并给出 planId。
+
 ### 建议销账与 TTL 兜底（A 组修复）
 
 活看起来干完但没人收尾时，系统**只建议、不擅自销账**：

@@ -25,7 +25,7 @@ import {
   noticeSource,
   type DetectedBlocker,
 } from './blockers.js'
-import { classifyTool, type RiskContext } from './risk.js'
+import { mcpParts, classifyTool, type RiskContext } from './risk.js'
 import {
   buildCandidates,
   deliveryFor,
@@ -35,7 +35,7 @@ import {
   validateDecision,
   type RouterSession,
 } from './router.js'
-import {
+import { planSummary,
   matchPlanCommand,
   matchPlanNetwork,
   matchPlanPath,
@@ -239,6 +239,7 @@ export class SuperagentService {
   }
 
   private async init(): Promise<void> {
+    await this.restorePendingNotices()
     this.meta = await this.store.getMeta()
     this.meta.startedAt = this.version.startedAt
     await this.store.saveMeta(this.meta)
@@ -894,7 +895,7 @@ export class SuperagentService {
   async injectButlerNotice(
     payload: ButlerNoticePayload | string,
     butlerSessionId?: string,
-  ): Promise<void> {
+  ): Promise<{ delivered: boolean; queued: boolean; targets: number }> {
     const notice: ButlerNoticePayload =
       typeof payload === 'string'
         ? { text: payload, butlerSessionId }
@@ -905,14 +906,20 @@ export class SuperagentService {
         ? [notice.butlerSessionId]
         : known
     if (targets.length === 0) {
+      // 还没有任何管家：进公共队列（会落盘），等管家出现时补投。
       this.queueButlerNotice('*', notice)
-      return
+      return { delivered: false, queued: true, targets: 0 }
     }
+    let delivered = false
     for (const id of targets) {
       const agent = this.agentOf(id)
-      if (agent) this.injectMessage(agent, notice.text, notice.source)
-      else this.queueButlerNotice(id, notice)
+      if (agent) {
+        if (this.injectMessage(agent, notice.text, notice.source)) delivered = true
+      } else {
+        this.queueButlerNotice(id, notice)
+      }
     }
+    return { delivered, queued: true, targets: targets.length }
   }
 
   private queueButlerNotice(butlerSessionId: string, notice: ButlerNoticePayload): void {
@@ -920,9 +927,32 @@ export class SuperagentService {
     queue.push(notice)
     if (queue.length > 20) queue.shift()
     this.pendingButlerNotices.set(butlerSessionId, queue)
+    // I-34：落盘再投递。进程重启后由 restorePendingNotices() 重建，不再丢。
+    this.persistPendingNotices()
   }
 
-  private injectMessage(agent: any, text: string, source?: ButlerNoticeSource): void {
+  /** 把内存队列整份写进存储（meta.pendingNotices）。失败只记日志，不影响主链路。 */
+  private persistPendingNotices(): void {
+    const items: Array<{ butlerSessionId: string; payload: ButlerNoticePayload }> = []
+    for (const [butlerSessionId, queue] of this.pendingButlerNotices) {
+      for (const payload of queue) items.push({ butlerSessionId, payload })
+    }
+    void this.store.savePendingNotices(items).catch(() => undefined)
+  }
+
+  /** 启动时从存储重建未读队列（I-34）。 */
+  private async restorePendingNotices(): Promise<void> {
+    const items = this.store.listPendingNotices()
+    if (items.length === 0) return
+    for (const item of items) {
+      const key = String(item?.butlerSessionId ?? '*')
+      const queue = this.pendingButlerNotices.get(key) ?? []
+      if (item?.payload) queue.push(item.payload)
+      this.pendingButlerNotices.set(key, queue)
+    }
+  }
+
+  private injectMessage(agent: any, text: string, source?: ButlerNoticeSource): boolean {
     try {
       const message = {
         id: uuid(),
@@ -931,8 +961,10 @@ export class SuperagentService {
         source: source ?? { kind: 'user' },
       }
       agent.inject(message)
+      return true
     } catch {
       this.queueButlerNotice(String(agent?.id ?? '*'), { text, source })
+      return false
     }
   }
 
@@ -945,7 +977,8 @@ export class SuperagentService {
     this.pendingButlerNotices.delete('*')
     this.pendingButlerNotices.delete(id)
     if (notices.length === 0) return
-    const summary = `【SuperAgent 提醒】重启/离线期间新增 ${notices.length} 条提醒：\n${notices
+    this.persistPendingNotices()
+    const summary = `【SuperAgent 提醒】重启/离线期间新增 ${notices.length} 条提醒（已落盘，重启不丢）：\n${notices
       .slice(-5)
       .map((notice) => `- ${firstLine(notice.text, 120)}`)
       .join('\n')}\n在管家对话里点按钮处理，或让管家查 butler_status。`
@@ -1855,11 +1888,26 @@ export class SuperagentService {
       `- 需要你：${blocker.neededAction}`,
       `- 用户会在对话里点按钮处理；这条只是通知，不是你的指令。`,
     ].join('\n')
-    await this.injectButlerNotice({
+    // I-34：先投递、拿到结果再记账。
+    // 「已注入」= 真的送到管家上下文；「进队列」= 进了持久化队列，管家回来会补投。
+    // 两者都不是时（理论上只在目标全挂时出现）**不记账**，保持 open 等下一轮重试，
+    // 否则就会出现「账上有、内容没了，于是既不重发也不重算」。
+    const delivery = await this.injectButlerNotice({
       text,
       source: noticeSource(notice),
       butlerSessionId: dispatch?.fromButlerSessionId,
     })
+    if (!delivery.delivered && !delivery.queued) {
+      await this.store.appendAudit({
+        sessionId: blocker.sessionId,
+        kind: 'blocker',
+        action: 'notify_deferred',
+        blockerId: blocker.id,
+        ...(ruleId ? { ruleId } : {}),
+        note: `投递失败（${delivery.targets} 个目标都不可用），保持待提醒，下一轮重试：${blocker.summary}`,
+      })
+      return
+    }
     blocker.status = 'notified'
     blocker.notifiedAt = blocker.notifiedAt ?? now()
     blocker.lastRemindedAt = now()
@@ -1871,7 +1919,9 @@ export class SuperagentService {
       action: 'remind',
       blockerId: blocker.id,
       ...(ruleId ? { ruleId } : {}),
-      note: blocker.summary,
+      note: delivery.delivered
+        ? blocker.summary
+        : `${blocker.summary}（管家离线，已落盘排队，回来补投）`,
     })
     if (ruleId) this.statsCache = null
   }
@@ -2123,6 +2173,20 @@ export class SuperagentService {
     return { allow: false, reason: '该 job 不属于本会话' }
   }
 
+  /** 本会话是否已经批准过同一 MCP 工具（同 server 同方法）。 */
+  private mcpAlreadyApproved(sessionId: string, toolName: string): boolean {
+    if (!this.config.mcp.batchApprove) return false
+    if (!mcpParts(toolName)) return false
+    return this.store
+      .listApprovals()
+      .some(
+        (approval) =>
+          approval.sessionId === sessionId &&
+          approval.toolName === toolName &&
+          (approval.status === 'user_approved' || approval.status === 'auto_approved'),
+      )
+  }
+
   private async gate(agent: any, exec: any, next: any): Promise<any> {
     const downstream = await next()
     if (this.isButlerAgent(agent)) return downstream
@@ -2148,6 +2212,20 @@ export class SuperagentService {
       return { kind: 'ask', reason: verdict.reason ?? '该 job 不属于本会话' }
     }
     if (downstream?.kind === 'ask') return downstream
+    // I-31(c)：同 server 同方法在本会话内已经批准过，就不再逐次问。
+    // 依据是**已落盘的审批记录**（不是内存），重启后依然有效。
+    if (mcpParts(toolName) && this.mcpAlreadyApproved(String(agent.id), toolName)) {
+      await this.store.appendAudit({
+        sessionId: String(agent.id),
+        kind: 'approval',
+        action: 'mcp_batch_allow',
+        by: 'butler-auto',
+        toolName,
+        risk: intent.risk,
+        note: `${toolName}：本会话已批准过同类调用，按批量放行`,
+      })
+      return downstream ?? { kind: 'allow' }
+    }
     if (intent.risk === 'high' || intent.risk === 'unknown') {
       if (await this.reviewBash(agent, exec, intent)) return downstream ?? { kind: 'allow' }
       return {
@@ -2622,10 +2700,11 @@ export class SuperagentService {
     )
     await this.injectButlerNotice({
       text: [
-        '【SuperAgent 进度】',
-        `- ${title} 提交了方案，但当前不需要审查（${reason}）`,
+        // I-33(4)：不能只留一句系统提示。要说清「不阻塞」+ 方案在哪 + 规模。
+        `【SuperAgent 进度】本次不阻塞：${title} 提交了方案（${reason}）`,
+        `- ${planSummary(plan)}`,
         `- ${truncate(planExcerpt(plan, 160), 200)}`,
-        `- 正文已落盘：planId ${plan.id}`,
+        `- 方案已落盘：planId ${plan.id}（侧栏「明细」可看全文）`,
       ].join('\n'),
       source: noticeSource(notice),
       butlerSessionId: dispatch?.fromButlerSessionId,
@@ -3748,6 +3827,19 @@ export class SuperagentService {
         )
       case 'ensure_butler':
         return { sessionId: await this.ensureButler() }
+      case 'plan_detail': {
+        // I-33：卡片上的「查看完整方案」。只读、按需拉，不进快照轮询。
+        const plan = this.store.getPlan(String(payload.planId ?? ''))
+        if (!plan) return { error: 'plan_not_found', planId: payload.planId }
+        return {
+          planId: plan.id,
+          title: plan.title,
+          status: plan.status,
+          summary: planSummary(plan),
+          markdown: plan.markdown,
+          scope: plan.scope,
+        }
+      }
       case 'diagnostics':
         return this.diagnostics()
       case 'refresh':

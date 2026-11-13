@@ -199,6 +199,23 @@ export class Store {
     await this.table<any>('meta').put('notices', { schemaVersion: 1, items })
   }
 
+  /**
+   * 待投递的提醒队列（I-34）。
+   *
+   * 存在 `meta` 表的 `pendingNotices` 键下（不新增表 = 不动 STORAGE_SPEC 版本）。
+   * 管家离线时提醒进这里；进程重启后从存储重建，不再靠内存。
+   */
+  listPendingNotices(): Array<{ butlerSessionId: string; payload: any }> {
+    const table = this.table<any>('meta')
+    const existing = table.get('pendingNotices')
+    const items = Array.isArray(existing?.items) ? existing.items : []
+    return items as Array<{ butlerSessionId: string; payload: any }>
+  }
+
+  async savePendingNotices(items: Array<{ butlerSessionId: string; payload: any }>): Promise<void> {
+    await this.table<any>('meta').put('pendingNotices', { schemaVersion: 1, items })
+  }
+
   listProjects(): Project[] {
     return this.list<Project>('projects')
   }

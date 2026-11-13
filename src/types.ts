@@ -487,6 +487,8 @@ export type ButlerNoticeVerb =
   | 'retry'
   | 'dispatch_completed'
   | 'dispatch_failed'
+  /** 只读展开：把计划正文拉到卡片里看（I-33）。 */
+  | 'open_plan'
   | 'open_session'
 
 export interface ButlerNoticeAction {
@@ -717,6 +719,13 @@ export interface Config {
     enabled: boolean
     minutes: number
   }
+  /**
+   * MCP 工具（I-31）：同 server 同方法在本会话内批过一次后，后续同类调用不再逐次问。
+   * 默认开；关掉就恢复「每次都要批」。
+   */
+  mcp: {
+    batchApprove: boolean
+  }
   /** Thread 聚合（P2）。关掉 = 销账回到按 dispatch、卡点不随活归档。 */
   thread: {
     enabled: boolean
@@ -802,6 +811,7 @@ export const DEFAULT_CONFIG: Config = {
   dispatchRetryLimit: 3,
   planReview: { allowReadOnlyBash: false },
   auditAllLowRisk: false,
+  mcp: { batchApprove: true },
   settleSuggest: { enabled: true, cooldownMs: 6 * 60 * 60_000 },
   settleTtl: { enabled: false, minutes: 24 * 60 },
   thread: { enabled: true, idleAbandonMs: 7 * 24 * 60 * 60_000 },

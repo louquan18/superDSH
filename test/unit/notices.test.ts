@@ -47,9 +47,10 @@ test('approval 卡点给「允许 / 拒绝 / 忽略」三个动作', () => {
   assert.equal(actions[1]!.style, 'danger')
 })
 
-test('plan_review 卡点给「批准 / 提修改意见 / 驳回 / 忽略」，且两个需要文本', () => {
+test('plan_review 卡点给「批准 / 提修改意见 / 驳回 / 查看完整方案 / 忽略」，且两个需要文本', () => {
   const actions = noticeActionsFor(makeBlocker({ kind: 'plan_review', relatedPlanId: 'plan_1' }))
-  assert.deepEqual(verbs(actions), ['approve', 'answer', 'reject', 'dismiss'])
+  // I-33：多一个只读的「查看完整方案」入口
+  assert.deepEqual(verbs(actions), ['approve', 'answer', 'reject', 'open_plan', 'dismiss'])
   const answer = actions.find((action) => action.verb === 'answer')
   const reject = actions.find((action) => action.verb === 'reject')
   assert.equal(answer?.requiresText, true)
@@ -177,4 +178,29 @@ test('R5 计划卡带方案摘要和正文首行，管家不用点进去就能�
   assert.match(notice.title, /计划待审/)
   assert.match(notice.detail!, /改扫描/)
   assert.equal(notice.planId, 'plan_1')
+})
+
+// ---------------------------------------------------------------- I-33 计划卡片
+
+test('I-33：计划卡片正文带「条目数/路径数」和方案摘要，并给只读的查看入口', () => {
+  const notice = buildBlockerNotice(
+    makeBlocker({
+      kind: 'plan_review',
+      relatedPlanId: 'plan_9',
+      summary: 'repo-a 提交了计划：改 PageServiceImpl（2 个计划条目，3 条路径，0 条命令）',
+      neededAction: '批准、提修改意见或驳回',
+      evidence: {
+        planId: 'plan_9',
+        planStats: '2 个计划条目，3 条路径，0 条命令',
+        planExcerpt: '目标：把权限申请已提交页的查询改成走缓存',
+      },
+    }),
+  )
+  assert.equal(notice.planId, 'plan_9')
+  assert.match(String(notice.detail), /2 个计划条目/, '卡片上要能直接看到规模')
+  assert.match(String(notice.detail), /缓存/, '要带方案摘要')
+  assert.ok(
+    (notice.actions ?? []).some((action) => action.verb === 'open_plan'),
+    '要有「查看完整方案」入口',
+  )
 })

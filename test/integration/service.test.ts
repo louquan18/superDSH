@@ -2648,3 +2648,165 @@ test('I-29：字段写错时报错要带上实际收到的键名，便于自我�
   assert.match(String(result?.message), /decision/, '要说出实际收到了哪些键')
   assert.match(String(result?.message), /"kind":"new"/, '要给最小可用示例')
 })
+
+// ---------------------------------------------------------------- I-34 投递落盘
+
+test('I-34：管家离线时提醒落盘，重启后队列可重建，卡片照样可见', async () => {
+  const { harness, cwd } = await boot()
+  const { butlerId } = await withButler(harness, cwd)
+  const service: any = harness.service
+
+  // 让管家「离线」：session 还在，但注册表里查不到 agent
+  harness.agents.delete(butlerId)
+
+  const delivery = await service.injectButlerNotice(
+    { text: '【SuperAgent 提醒】离线期间产生的一条提醒' },
+    butlerId,
+  )
+  assert.equal(delivery.delivered, false, '管家不在线，不该算已送达')
+  assert.equal(delivery.queued, true, '要进持久化队列')
+
+  // 1) 落盘：存储里必须能看到（原来这里是纯内存，重启即丢）
+  const persisted = harness.service.store.listPendingNotices()
+  assert.equal(persisted.length, 1, '离线队列必须落盘')
+  assert.equal(persisted[0]!.butlerSessionId, butlerId)
+  assert.match(String(persisted[0]!.payload?.text), /离线期间产生/)
+
+  // 2) 模拟重启：内存清空，从存储重建
+  service.pendingButlerNotices.clear()
+  assert.equal(service.pendingButlerNotices.size, 0)
+  await service.restorePendingNotices()
+  assert.equal(
+    service.pendingButlerNotices.get(butlerId)?.length,
+    1,
+    '重启后必须能从存储把未读队列重建回来',
+  )
+
+  // 3) 卡片可重放：blocker 仍是 notified → 快照里照常出现（不受 wake 去重影响）
+  await harness.service.store.putBlocker({
+    id: 'blk_offline',
+    sessionId: 'worker-offline',
+    kind: 'settle_suggest',
+    severity: 'info',
+    status: 'notified',
+    signature: 'settle:dsp_offline',
+    summary: '看起来已经干完，要不要销账？',
+    neededAction: '确认完成',
+    evidence: { dispatchId: 'dsp_offline' },
+    detectedAt: Date.now(),
+    lastSeenAt: Date.now(),
+    reminderCount: 1,
+  } as any)
+  const snapshot = await harness.service.snapshot()
+  assert.ok(
+    (snapshot.blockerNotices ?? []).some((item: any) => item.blockerId === 'blk_offline'),
+    '重启后未读卡片必须还能在快照里渲染出来',
+  )
+})
+
+// ---------------------------------------------------------------- I-31 MCP 批量放行
+
+test('I-31(c)：同会话同 MCP 方法批过一次后不再逐次问（可关）', async () => {
+  const { harness, cwd } = await boot()
+  await withButler(harness, cwd)
+  harness.addAgent('worker-mcp', cwd)
+  await harness.service.listSessions(true)
+  await harness.service.dispatchExecute(
+    { kind: 'reuse', sessionId: 'worker-mcp', reason: 't' },
+    '用 MCP 验一下页面',
+  )
+  const agent = harness.agents.get('worker-mcp')
+  // 用会改变状态的方法：take_snapshot 现在属于只读，会直接放行，验不到审批路径
+  const tool = 'mcp__chrome-devtools-mcp__click'
+
+  // 第一次：需要审批
+  const first = await harness.gate(agent, tool, {})
+  assert.equal(first.kind, 'ask', `第一次应当审批，实际 ${JSON.stringify(first)}`)
+
+  // 用户批过一次（写一条已批准记录）
+  await harness.service.store.putApproval({
+    id: 'apv_mcp_1',
+    sessionId: 'worker-mcp',
+    toolName: tool,
+    argsSummary: '{}',
+    risk: 'high',
+    status: 'user_approved',
+    decidedBy: 'user',
+    createdAt: Date.now(),
+    decidedAt: Date.now(),
+  } as any)
+
+  // 第二次：同会话同方法 → 不再问
+  const second = await harness.gate(agent, tool, {})
+  assert.notEqual(second.kind, 'ask', '批过一次后不该再问')
+  const audited = harness.service.store
+    .listAudit()
+    .filter((item) => item.action === 'mcp_batch_allow')
+  assert.equal(audited.length, 1, '批量放行要留痕')
+  assert.equal(audited[0]!.by, 'butler-auto')
+})
+
+// ---------------------------------------------------------------- I-33 计划进对话
+
+test('I-33：待审计划进对话卡片（带 planId 与入口），plan_detail 能取到正文', async () => {
+  const { harness, cwd } = await boot()
+  await withButler(harness, cwd)
+  harness.addAgent('worker-plan', cwd)
+  await harness.service.listSessions(true)
+  await harness.service.setMode(harness.service.ensureProjectForCwd(cwd).key, 'plan_review')
+  await harness.service.dispatchExecute(
+    { kind: 'reuse', sessionId: 'worker-plan', reason: 't' },
+    '改一下页面查询',
+  )
+
+  const submitted: any = await harness.service.submitPlan(harness.agents.get('worker-plan'), {
+    title: '改 PageServiceImpl 查询',
+    plan: '目标：把查询改成走缓存\n\n步骤：1) 改 service 2) 跑测试',
+    scope: { items: [{ id: 'P1', description: 'service', paths: ['src/**'] }] },
+  })
+  assert.equal(submitted.status, 'pending_review')
+
+  const snapshot = await harness.service.snapshot()
+  const card = (snapshot.blockerNotices ?? []).find(
+    (item: any) => item.planId === submitted.planId,
+  ) as any
+  assert.ok(card, '待审计划必须出现在对话卡片里')
+  assert.match(String(card.detail), /计划条目/, '卡片要带规模信息')
+  assert.ok(
+    (card.actions ?? []).some((action: any) => action.verb === 'open_plan'),
+    '卡片要有查看完整方案的入口',
+  )
+
+  // 「查看完整方案」拉到的正文
+  const detail: any = await harness.service.handleAction('plan_detail', {
+    planId: submitted.planId,
+  })
+  assert.match(String(detail.markdown), /走缓存/)
+  assert.match(String(detail.summary), /计划条目/)
+})
+
+test('I-33(4)：gate_confirm 下方案不阻塞，但对话里要明确说清「本次不阻塞 + 方案在哪」', async () => {
+  const { harness, cwd } = await boot()
+  const { butler } = await withButler(harness, cwd)
+  harness.addAgent('worker-plan2', cwd)
+  await harness.service.listSessions(true)
+  await harness.service.setMode(harness.service.ensureProjectForCwd(cwd).key, 'gate_confirm')
+  await harness.service.dispatchExecute(
+    { kind: 'reuse', sessionId: 'worker-plan2', reason: 't' },
+    '卡点确认模式下交个方案',
+  )
+
+  const submitted: any = await harness.service.submitPlan(harness.agents.get('worker-plan2'), {
+    title: '卡点确认模式的方案',
+    plan: '这是方案正文',
+    scope: { items: [{ id: 'P1', description: 'x', paths: ['src/**'] }] },
+  })
+  assert.equal(submitted.status, 'not_required')
+  assert.equal(submitted.stored, true, '不需要审查也要落盘')
+
+  const texts = (butler.injected as any[])
+    .map((message) => JSON.stringify(message?.content ?? ''))
+    .join('\n')
+  assert.match(texts, /本次不阻塞/, '要说清不阻塞')
+  assert.match(texts, new RegExp(String(submitted.planId)), '要给出 planId 便于去找正文')
+})

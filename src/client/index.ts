@@ -1356,6 +1356,8 @@
     const [busy, setBusy] = React.useState(null)
     const [error, setError] = React.useState(null)
     const [done, setDone] = React.useState(null)
+    // I-33：按需展开的计划正文（不随每 2 秒的快照轮询背着走）
+    const [planText, setPlanText] = React.useState('')
     if (!notice) return null
     const derived = noticeState(notice, snapshot)
     const settled = Boolean(done) || derived.settled
@@ -1377,6 +1379,18 @@
       setBusy(action.verb)
       setError(null)
       try {
+        if (action.verb === 'open_plan') {
+          const result: any = await api.action('plan_detail', { planId: notice.planId })
+          const value = result?.value ?? result
+          if (value?.error) {
+            setError(String(value.error))
+          } else {
+            setPlanText(`${value?.summary ?? ''}\n\n${value?.markdown ?? ''}`.trim())
+            // 展开是只读动作，不能把卡片置成「已处理」，否则审批按钮会被禁用
+          }
+          void store?.refresh?.()
+          return
+        }
         if (action.verb === 'dispatch_completed' || action.verb === 'dispatch_failed') {
           await api.action('dispatch_mark', {
             dispatchId: notice.dispatchId,
@@ -1421,6 +1435,16 @@
         h('span', { className: 'sab-note' }, fmtTime(notice.at)),
       ),
       notice.detail ? h('div', { className: 'sab-notice-detail' }, truncate(notice.detail, 400)) : null,
+      planText
+        ? h(
+            'pre',
+            {
+              className: 'sab-notice-detail',
+              style: { whiteSpace: 'pre-wrap', margin: '6px 0 0', maxHeight: 320, overflow: 'auto' },
+            },
+            planText,
+          )
+        : null,
       notice.neededAction
         ? h('div', { className: 'sab-notice-detail' }, `需要你：${notice.neededAction}`)
         : null,

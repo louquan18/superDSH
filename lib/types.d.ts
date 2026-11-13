@@ -407,7 +407,9 @@ export interface ResolvedBlockerView {
     resolvedAt?: number;
 }
 /** 提醒卡片上的一个可点动作。 */
-export type ButlerNoticeVerb = 'approve' | 'reject' | 'answer' | 'dismiss' | 'retry' | 'dispatch_completed' | 'dispatch_failed' | 'open_session';
+export type ButlerNoticeVerb = 'approve' | 'reject' | 'answer' | 'dismiss' | 'retry' | 'dispatch_completed' | 'dispatch_failed'
+/** 只读展开：把计划正文拉到卡片里看（I-33）。 */
+ | 'open_plan' | 'open_session';
 export interface ButlerNoticeAction {
     verb: ButlerNoticeVerb;
     label: string;
@@ -630,6 +632,13 @@ export interface Config {
     settleTtl: {
         enabled: boolean;
         minutes: number;
+    };
+    /**
+     * MCP 工具（I-31）：同 server 同方法在本会话内批过一次后，后续同类调用不再逐次问。
+     * 默认开；关掉就恢复「每次都要批」。
+     */
+    mcp: {
+        batchApprove: boolean;
     };
     /** Thread 聚合（P2）。关掉 = 销账回到按 dispatch、卡点不随活归档。 */
     thread: {

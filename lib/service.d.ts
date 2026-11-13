@@ -133,8 +133,16 @@ export declare class SuperagentService {
      * 传字符串时行为与旧版一致（纯文本提醒）；传 payload 时可以带上结构化 source，
      * 客户端据此把这条消息渲染成一张可点按钮的卡片。
      */
-    injectButlerNotice(payload: ButlerNoticePayload | string, butlerSessionId?: string): Promise<void>;
+    injectButlerNotice(payload: ButlerNoticePayload | string, butlerSessionId?: string): Promise<{
+        delivered: boolean;
+        queued: boolean;
+        targets: number;
+    }>;
     private queueButlerNotice;
+    /** 把内存队列整份写进存储（meta.pendingNotices）。失败只记日志，不影响主链路。 */
+    private persistPendingNotices;
+    /** 启动时从存储重建未读队列（I-34）。 */
+    private restorePendingNotices;
     private injectMessage;
     private flushButlerNotices;
     /** §6.4：只对管家派发的任务推进度，手动 session 只更新面板。 */
@@ -238,6 +246,8 @@ export declare class SuperagentService {
      * 读不到归属就要求审批，绝不把「未知」当成「属于本会话」。
      */
     private jobKillVerdict;
+    /** 本会话是否已经批准过同一 MCP 工具（同 server 同方法）。 */
+    private mcpAlreadyApproved;
     private gate;
     private answerApproval;
     private holdApproval;

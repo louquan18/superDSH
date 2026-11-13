@@ -8,6 +8,7 @@ import {
   planExcerpt,
   planRequiredFor,
   planSummary,
+  explainPlanMiss,
   scopeItems,
 } from '../../src/plans.js'
 import type { Dispatch, Plan, PlanScopeItem } from '../../src/types.js'
@@ -146,4 +147,50 @@ test('R1 planExcerpt 给出一行正文和范围统计', () => {
   assert.match(excerpt, /1 个计划条目/)
   assert.match(excerpt, /改扫描/)
   assert.equal(excerpt.includes('细节一'), false, '只取首行')
+})
+
+// ---------------------------------------------------------------- I-35 scope 归一化
+
+test('I-35：计划 scope 写绝对路径时，计划内的文件也要命中', () => {
+  // 复现现场：worker 提交的 scope 是绝对路径（plan_062e986d22474989 就是这么写的）
+  const plan = makePlan([
+    {
+      id: 'backend',
+      description: 'PageServiceImpl',
+      paths: ['/proj/src/main/java/com/proj/service/impl/PageServiceImpl.java'],
+    },
+  ])
+  const target = '/proj/src/main/java/com/proj/service/impl/PageServiceImpl.java'
+
+  const match = matchPlanPath(plan, '/proj', target)
+  assert.ok(match, '绝对 scope 必须能匹配同一文件的绝对目标（原来恒不命中）')
+  assert.equal(match!.item.id, 'backend')
+
+  // 绝对 glob 也要能命中
+  const glob = makePlan([{ id: 'all', description: 'src 全量', paths: ['/proj/src/**'] }])
+  assert.ok(matchPlanPath(glob, '/proj', target), '绝对 glob 同样要归一化后再匹配')
+})
+
+test('I-35：相对规则照常命中；项目外的绝对规则不会被当成匹配', () => {
+  const rel = makePlan([{ id: 'i1', description: 'src', paths: ['src/**'] }])
+  assert.ok(matchPlanPath(rel, '/proj', '/proj/src/a.ts'))
+
+  const outside = makePlan([{ id: 'i2', description: '外部目录', paths: ['/other/src/**'] }])
+  assert.equal(
+    matchPlanPath(outside, '/proj', '/proj/src/a.ts'),
+    undefined,
+    '项目外的规则不能放宽成本项目内可写',
+  )
+})
+
+test('I-35：命中失败时能说清「目标相对路径 + 计划里都有哪些规则」', () => {
+  const plan = makePlan([
+    { id: 'i1', description: 'a', paths: ['/proj/src/**'] },
+    { id: 'i2', description: 'b', paths: ['/other/**'] },
+  ])
+  const miss = explainPlanMiss(plan, '/proj', '/proj/docs/readme.md')
+  assert.equal(miss.relPath, 'docs/readme.md')
+  assert.equal(miss.patterns.length, 2)
+  assert.ok(miss.patterns[0]!.includes('src/**'), '要给出归一化后的规则')
+  assert.match(miss.patterns[1]!, /项目外，已忽略/)
 })
