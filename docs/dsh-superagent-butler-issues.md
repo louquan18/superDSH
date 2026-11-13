@@ -60,8 +60,8 @@
 | I-19 | watchdog 把「等审批」误判为停滞 | ✅ 已修复 | P1 |
 | I-20 | watchdog 不识别「疑似已完成」 | ✅ 已修复 | P1 |
 | I-21 | 派发不销账导致 watchdog 反复产生假唤醒 | ✅ 已修复 | P1 |
-| I-22 | 改配置文件必须跨沙箱提权 | ⏸️ 待决策 | P1 |
-| I-23 | 老管家会话积压消息 | ⏸️ 待决策 | P2 |
+| I-22 | 改配置文件必须跨沙箱提权 | ✅ 已修复 | P1 |
+| I-23 | 老管家会话积压消息 | ✅ 已修复 | P2 |
 | I-28 | 工作完成或卡点结束后没人销账，派发一直挂着 | ✅ 已修复 | P1 |
 | I-29 | `butler_dispatch` 的决策字段名与工具说明不一致，传错时报错误导 | ✅ 已修复 | P2 |
 | I-30 | 审批在界面上不可见，且审批路由不分层 | 📥 待处理 | P1 |
@@ -103,17 +103,7 @@
 
 ## ⏸️ 待决策
 
-### I-22 改配置文件必须跨沙箱提权，路径不可靠
-- **状态**：⏸️ 待决策
-- **现象**：`~/.dsh/profiles/web/cordis.patch.yml` 在工作区外，worker 写入需 `danger-full-access`；**审批一挂起 turn 即挂起，任何打断都会让整个 turn 作废、改动丢失**——今天为改三行配置失败 3 次，最终由用户手改。
-- **修复方法**：(a) 给插件加配置自检命令 `/superagent doctor`（只读报告当前配置是否加载、来源可用性），减少手改需求；(b) 提供受支持的配置写入通道（如 `/superagent config set`），由宿主持久化，避免 worker 直接编辑；(c) 保持手改。
-- **备注**：原 D-05；2026-11-09。
-
-### I-23 老管家会话积压消息
-- **状态**：⏸️ 待决策
-- **现象**：`session-fc0f4e6f`（旧 ontology 项目）`queuedCount=31`、`session-6385aa8d` 为 9；都是 idle，队列不会自己消化。
-- **修复方法**：(a) 清空队列；(b) 归档/关闭这两个会话；(c) 保留观察。
-- **备注**：原 D-06；2026-11-09。
+（暂无）
 
 ## ✅ 已修复
 
@@ -309,6 +299,34 @@
 - **备注**：单测 3 条（绝对 scope 命中 / 相对规则照常 + 项目外规则不放宽 / 失败时给 relPath 与规则）+ risk 层 2 条（绝对 scope 的计划内 edit 判 low；**真·计划外写入仍判 high**）。第二条是防过度放宽的护栏。
   **反向验证**：把 `scopePatternToRelative()` 的调用改成直接用原 pattern → 两条用例变红。2026-11-13。
 
+### I-22 改配置文件必须跨沙箱提权，路径不可靠
+- **状态**：✅ 已修复（(a) 已实现；(b) 结论：宿主无受支持的写入通道，配置修改仍需手改 + 重启）
+- **现象**：`~/.dsh/profiles/web/cordis.patch.yml` 在工作区外，worker 写入需 `danger-full-access`；审批一挂起 turn 即挂起，改动丢失（历史失败 3 次，最终用户手改）。
+- **修复方法**：
+  - **(a) `/superagent doctor`（只读自检，已实现）**：`src/host/command.ts`。报告：插件版本（`codeVersion` + `configHash` + 启动时间）、管家会话与「门禁/worker 工具已装载的会话数」、管家工作区（含是否存在）、各来源（dsh/claude/codex）是否启用与不可用原因、以及**关键配置项的实际生效值**（扫描间隔、计划门禁、policy/shadowRules、thread、mcp.batchApprove、settleSuggest/settleTtl、watchdog、progress.wake、bashReview、两个外部来源开关）。**纯只读**：不写 `~/.dsh`、不写审计、不做任何状态变更（有单测断言「零写入」）。启动失败时进入降级分支，直接说明降级原因并提示检查 `cordis.patch.yml`——那正是最需要自检的时刻。
+  - **(b) 配置写入通道（只评估，未实现）**：结论是**没有**受支持通道，见下方评估。
+- **备注**：`(b)` 评估证据（2026-11-13 查本机 dsh 0.2.2-rc.1）。**只查代码与宿主 API，未读任何配置内容或凭据文件**：
+  0. **插件侧（本插件自身）无写入口**：`src/host/command.ts` 现有 7 个子命令（help/doctor/status/inbox/mode/dispatch/butler/refresh）都不写配置；`src/host/routes.ts` 不直接写文件；全 `src/` 里 `writeFile` / `profiles/` / `cordis.patch` 只剩一句提示文案，没有任何持久化代码。
+  1. `dsh --dump-config` / `--dump-config-schema`：只读，只能看组合后的配置树与 schema；
+  2. `dsh plugin`：把参数**原样转发给 pnpm**（add/remove 包），没有 `config set`；
+  3. `dsh-plugin-manager`：会用 `writeFileAtomic` 写 `package.json` / `pnpm-workspace.yaml` / run 记录，但对 `cordis.patch.yml` **只读**（`diskState()` 读取用于判变更），无写入 API；
+  4. `dsh-settings` + `dsh-api-settings-controller`：**确有**受支持写入 API（`settings.update(ns, patch)` 带 revision 冲突检测、credentials `set/unset`），插件可用 `ctx.get('settings')` 取得；但它持久化的是**settings 命名空间（应用/用户设置）**，不是插件加载配置；
+  4.1 `cordis-plugin-loader`：**没有任何 `writeFile` 调用**（只做装载/解析/组合），不持久化配置；
+  4.2 `dsh-app-boot` 的 `loader.*` 只有 `entries()/await()/create()/import()/resolveSync()` 这类装载操作，写文件只出现在版本豁免等内部状态上，无 patch 写入路径。
+  5. 因此改插件配置**目前只能**手改 patch 文件 + 重启。
+  6. 若要接：可让插件声明 settings 命名空间（如 `superagent`），在 `resolveConfig()` 后合并进生效配置，配 `/superagent config set`。限制：只对运行时读取的阈值/开关有效；**影响插件挂载的项**（如 sources 是否注册）仍需重启；属新功能，本轮未做。
+  **验证**：单测 3 条（正常自检内容 + 零写入断言 + 降级分支）。**反向验证**：给 doctor 注入一次 `appendAudit` → 「只读」用例变红，按单行改回。2026-11-13。
+
+### I-23 老管家会话积压消息
+- **状态**：✅ 已修复（复核无积压，无需清理）
+- **现象**：2026-11-09 记录 `session-fc0f4e6f`（旧 ontology 项目）`queuedCount=31`、`session-6385aa8d` 为 9；都是 idle，怀疑队列不会自己消化。
+- **修复方法**：**复核后确认无需处理**，未做任何清理（那是用户会话数据）。
+- **备注**：2026-11-13 复核证据 —
+  1. 两个会话仍在磁盘上：`~/.dsh/sessions/--…baidu-gcloud-ontology--/session-fc0f4e6f-…`（最后写入 11-09 19:11）与 `--…default-workspace--/session-6385aa8d-…`（最后写入 11-13 11:21）；
+  2. 两者会话文档里**只有一条 header 记录**，不含任何 `queue`/`queued` 事件；
+  3. 全盘 `~/.dsh` 下**没有任何队列文件**（`find -iname '*queue*'` 为空）→ 队列是 session controller 的内存态，**dsh 重启即清零**；这期间为验证 P0/P1/P2 已重启多次，故 11-09 的 31/9 不会留存；
+  4. 结论：症状已消失，队列无需消化也不需清理。**若要看实时数字**：重启后在管家面板或 `butler_status` 里看 `queuedCount`（该项来自活进程的 session controller，只有运行时才有值）。2026-11-13。
+
 ## 🚫 不修 / 已知限制
 
 ### I-24 Claude 的 running 是推断值
@@ -359,3 +377,4 @@
 | 2026-11-13 | 新增 I-35（计划 scope 绝对路径与匹配相对路径错位，计划内写入被误判计划外，📥 待处理 / P1）；清单共 34 条 |
 | 2026-11-13 | 补充 I-34 技术细节（三条知情通道、内存队列、记账顺序、落盘对照、扫描边界、未确认项），条目不增；清单仍 34 条 |
 | 2026-11-13 | A 组第二轮：I-31/I-33/I-34/I-35 → ✅（I-33 第 (3) 项「回复即批」未做，已注明）。清单仍 34 条 |
+| 2026-11-13 | B 组：I-22（/superagent doctor + config 写入通道评估）、I-23（复核无积压）→ ✅。清单仍 34 条，待决策分区已清空 |

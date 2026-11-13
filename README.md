@@ -298,6 +298,21 @@ policy:
 
 > shadow 期间**不推进 `reminderCount` 配额**，但会推进节流时间——否则每轮扫描都会刷一条审计。审计里能看到 `shadow: true` 和「本会提醒……」的原因。
 
+## `/superagent doctor`（只读自检，I-22）
+
+为了「看一眼配置到底生效没有」而去改 `~/.dsh`，历史上把 turn 挂起过几次。所以加了一条纯只读命令：
+
+```
+/superagent doctor
+```
+
+输出：插件版本（`codeVersion` + `configHash` + 启动时间）、管家会话与「门禁/worker 工具已装载的会话数」、管家工作区（含是否存在）、各来源是否启用与不可用原因，以及**关键配置项的实际生效值**（扫描间隔、计划门禁、policy/shadowRules、thread、mcp.batchApprove、settleSuggest/settleTtl、watchdog、progress.wake、bashReview、外部来源开关）。
+
+- **只读**：不写 `~/.dsh`、不写审计、不改任何状态（单测断言「零写入」）。
+- 启动失败时也能用：会说明降级原因并提示检查 `cordis.patch.yml`。
+
+> 改插件配置目前**没有**受支持的写入通道（详见问题清单 I-22 的评估：`dsh --dump-config` 只读、`dsh plugin` 只转发 pnpm、plugin-manager 只读 patch 文件、settings API 管的是应用设置而非插件加载配置）。改配置仍需手改 profile 的 `cordis.patch.yml` 并重启 dsh。
+
 ## 配置项
 
 默认值见 `src/types.ts` 的 `DEFAULT_CONFIG`，可在 bundle patch 的 `config` 下覆盖（如 `butler.title`、`butler.cwd`、`planReview.allowReadOnlyBash`、`progress.notifyMilestones`、`scanIntervalMs`）。提醒相关的 `reminderCooldownMs`/`maxRemindersPerBlocker` 只作用于本插件，**不受**工作区 `AGENTS.md` 的安静时段与每日上限约束（设计 §6.2）。
