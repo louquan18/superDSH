@@ -992,6 +992,58 @@
     return h(
       'div',
       null,
+      (snapshot.pendingQuestions ?? []).length > 0
+        ? h(
+            Section,
+            { title: `待界面回答的提问 · ${(snapshot.pendingQuestions ?? []).length}` },
+            [
+              h(
+                'table',
+                { className: 'sab-table', key: 'pendingQuestions' },
+                h(
+                  'thead',
+                  null,
+                  h('tr', null, ['会话', '提问', '选项', '管家代答'].map((label) =>
+                    h('th', { key: label }, label),
+                  )),
+                ),
+                h(
+                  'tbody',
+                  null,
+                  (snapshot.pendingQuestions ?? []).map((row: any) =>
+                    h(
+                      'tr',
+                      { key: row.callId },
+                      h('td', null, String(row.sessionId ?? '').slice(0, 20)),
+                      h(
+                        'td',
+                        null,
+                        (row.questions ?? [])
+                          .map((question: any) => String(question?.question ?? question?.header ?? ''))
+                          .join(' / '),
+                      ),
+                      h(
+                        'td',
+                        null,
+                        (row.questions ?? [])
+                          .flatMap((question: any) =>
+                            (question?.options ?? []).map((option: any) => String(option?.label ?? '')),
+                          )
+                          .filter(Boolean)
+                          .join(' / '),
+                      ),
+                      h(
+                        'td',
+                        null,
+                        row.needsUiAnswer ? '够不着，请到界面回答' : '可代答',
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          )
+        : null,
       (snapshot.pendingNotices ?? []).length > 0
         ? h(
             Section,

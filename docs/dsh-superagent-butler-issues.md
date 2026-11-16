@@ -70,7 +70,7 @@
 | I-33 | 计划只能去侧栏明细看，对话里无法审批 | ✅ 已修复 | P1 |
 | I-34 | 提醒送达无持久化，管家离线即丢且同签名不重发 | ✅ 已修复 | P0 |
 | I-35 | 计划 scope 绝对路径与匹配相对路径错位，计划内写入被误判计划外 | ✅ 已修复 | P1 |
-| I-36 | 管家回答阻塞中的提问是假成功（answer 用了只对 continued 有效的 API） | 🔧 进行中 | P1 |
+| I-36 | 管家回答阻塞中的提问是假成功（answer 用了只对 continued 有效的 API） | ✅ 已修复 | P1 |
 | I-24 | Claude 的 running 是推断值 | 🚫 不修 / 已知限制 | P2 |
 | I-25 | Codex 无法区分 root / 子会话 | 🚫 不修 / 已知限制 | P2 |
 | I-26 | 外部来源只读 | 🚫 不修 / 已知限制 | P2 |
@@ -97,7 +97,7 @@
 - **备注**：与 I-30、I-31 同源但**问的是三件不同的事**——I-30 问「审批看不看得见、该谁批」，I-31 问「每步都批导致自动化验证跑不完」，本条问「**审批链上没有主动方**：worker 不报、管家不问、用户不知」。与 I-31 叠加时后果最严重：一条自动化任务可以无限期停摆而无人知晓（本次 14 小时实例）。优先级 **P0**：不是体验问题，是「任务卡死且无人发现」的可靠性缺口。2026-11-13 记录。
 
 ### I-36 管家回答「阻塞中的提问」是假成功：answer 走了只对 continued 提问有效的宿主 API，返回 ok 但 worker 收不到
-- **状态**：🔧 进行中（假成功已消除、应答组包已修正；「插件未持有提问时如何接管」仍未解，见备注）
+- **状态**：✅ 已修复（含已知限制：插件无法事后认领「不持有句柄的 open 提问」，只能引导到界面回答）
 - **现象**：baidu 项目的专职 git worker（新会话 `session-377c0892-7a3b-4a90-9f72-7e1acaf0aede`，派发 `dsp_eaf9bd11ff8f4ec8`）用 `ask_user_question` 问「后端 `.gitignore` 有已跟踪修改，要不要一起提交？」并给出两个选项 → 产生 question 类卡点 `blk_969cea1fd81b4bc2`（callId `call_01_2fpf9zxrx19fbitdi6cdtwga`），会话进入 `hardStatus=awaiting_answer`。管家先后对 decision 类卡点 `blk_c628567e06aa4a76` 与这个 question 类卡点各调一次 `butler_resolve action=answer`，**两次都返回「已回答/已转发」，但 worker 从未收到**：会话一直停在 `awaiting_answer`，`queuedCount` 持续 1~2，最后只能由用户手动回答才解开。
 - **修复方法**：
   1. **按提问状态分流（根因修复）**：`answerQuestionByCall`（`src/service.ts:2707`）现在不区分状态地调 `ctx.userQuestions.answer()`（`2744`）。必须改成：
@@ -180,6 +180,27 @@
 
 **验证**：单测 4 条（`test/unit/answer.test.ts`：命中选项 / 自由文本 / 多问题 / 无问题兜底）+ 集成 2 条（waiter 路径按问题 id 真送达；宿主返回 false 时不假成功、不清卡点、留审计）。
 **反向验证**：① 把 `id` 改回写死的 `'answer'` → 4 条用例变红；② 把 `if (accepted === false)` 去掉（忽略返回值）→ 「不许假成功」用例变红。两处均单行改回。
+
+
+**方案 A 实现（2026-11-16，用户拍板）**
+
+目标是让「够不着的提问」**可见、可查、不假成功**，而不是硬装作能代答：
+
+1. **收到提问即落盘**：`answerQuestion` 命中时调 `rememberPendingQuestion()`（`src/service.ts`），把 `callId / sessionId / 提问正文 / options` 写进 `meta.pendingQuestions`（不新增表）；答完或取消时 `forgetPendingQuestion()` 摘掉。
+2. **够不着就明确标记**：`markQuestionNeedsUiAnswer()` 给三处打标——落盘记录 `needsUiAnswer: true`、对应卡点 `evidence.needsUiAnswer` + `neededAction = '该提问只能到界面上回答（管家代答通道够不着）'`，并触发一次 `queueEmit`。
+3. **重启后自动标记**：`init()` 里遍历 `listPendingQuestions()`，凡仍在的待答提问一律标「需到界面回答」——新进程**一定**不持有旧句柄，这个判断是确定的，不需要猜。
+4. **console 侧可见**：快照新增 `pendingQuestions`（带 `questions[].question` 与 `options[].label`、`needsUiAnswer`），面板「明细」页新增「待界面回答的提问」表（会话 / 提问 / 选项 / 管家代答是否够得着）。用户能直接照着选项选。
+5. **失败语义**：`butler_resolve answer` 对这类提问返回 `{ok:false, reason:'question_not_held'}`，文案指向界面回答；审计写 `answer_question_failed`；**不清卡点**。
+6. **不做**：没有为本条实现任何「事后认领 open 提问」的能力（见已知限制）。
+
+**已知限制（不在插件能力内）**
+
+- 宿主 `userQuestions.answer()` 只覆盖 `continued`（超时转后续轮次）的提问；仍 `open` 的提问只能由**提问当时**注册的 answerer 在 `ask()` 期间 resolve。
+- **插件无法事后认领「不持有句柄的 open 提问」**：没有可用的宿主 API（`ask()` 的 promise 不在我们手里就没法 join）。因此重启前发起、重启后才被处理的提问，**只能引导用户到界面回答**。
+- 要根治需要上游提供「事后认领/答复 open 提问」的 API（方案 B），属宿主能力，不在本插件范围内；本轮按用户要求**未做任何相关实现**。
+
+**验证**：单测 4 条（`test/unit/answer.test.ts`）+ 集成 3 条（waiter 路径真送达 / 宿主 false 不假成功且标 UI-only / 落盘+重启后快照标「需到界面回答」并带选项）。
+**反向验证**：① 去掉 `markQuestionNeedsUiAnswer()` 调用 → 2 条用例变红；② 去掉 `rememberPendingQuestion()` 落盘 → 「落盘 + 重启标记」用例变红。均单行改回。
 
 ## 🔧 进行中
 
@@ -501,3 +522,4 @@
 | 2026-11-16 | I-34 补：改投三约束（同项目才改投/目标还活着按原键/不丢且快照可见）；I-32 部分完成（(1)(3) 真唤醒已做，(2) LLM 代审未做）。条目数不变 |
 | 2026-11-16 | 新增 I-36：管家回答 `ask_user_question` 的阻塞提问是假成功（`userQuestions.answer()` 只对 continued 有效 + 忽略返回 false + 仍清卡点）。附实例 blk_969cea1fd81b4bc2 / dsp_eaf9bd11ff8f4ec8。清单 34 → 35 条 |
 | 2026-11-16 | I-36 实现：应答按问题 id 组包（answerForQuestions）+ 宿主 answer() 返回 false 时不再假成功（保留卡点、写 answer_question_failed）。纠正上轮「无 answerer」的误记。条目数不变 |
+| 2026-11-16 | I-36 方案 A：待答提问落盘（meta.pendingQuestions）+ 重启后标记「需到界面回答」+ 快照/明细页带正文与选项；已知限制（无法事后认领 open 提问，需上游 API）已写入备注。条目数不变 |

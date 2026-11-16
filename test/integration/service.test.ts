@@ -3101,15 +3101,86 @@ test('I-36：宿主 answer() 返回 false（不是 continued）时不许报成�
     'butler-chat',
   )
   assert.equal(out.ok, false, '不能假成功')
-  assert.equal(out.reason, 'question_not_pending')
+  assert.equal(out.reason, 'question_not_held')
   assert.match(String(out.message), /界面/, '要给可执行的下一步')
-  assert.equal(
-    harness.service.store.getBlocker('blk_q_fail')!.status,
-    'notified',
-    '卡点不能被标成已处理（那正是旧的假成功）',
-  )
+
+  const blocker = harness.service.store.getBlocker('blk_q_fail')!
+  assert.equal(blocker.status, 'notified', '卡点不能被标成已处理（那正是旧的假成功）')
+  assert.equal((blocker.evidence as any).needsUiAnswer, true, '卡点要标出「只能到界面回答」')
+  assert.match(String(blocker.neededAction), /界面/)
+
   assert.ok(
     harness.service.store.listAudit().some((item) => item.action === 'answer_question_failed'),
     '失败要留审计',
+  )
+})
+
+test('I-36 A：收到提问就落盘；重启后（waiter 丢失）快照里标「需到界面回答」', async () => {
+  const { harness, cwd } = await boot()
+  await withButler(harness, cwd)
+  harness.addAgent('worker-q3', cwd)
+  const agent = harness.agents.get('worker-q3')
+  const callId = 'call_q_persist'
+
+  // 模拟 worker 的 ask_user_question 落到插件 answerer
+  void (harness.service as any).answerQuestion(
+    agent,
+    {
+      wait: { callId },
+      questions: [
+        {
+          id: 'q1',
+          question: '后端 .gitignore 有已跟踪修改，要不要一起提交？',
+          options: [{ label: '不提交' }, { label: '一起提交' }],
+        },
+      ],
+    },
+    () => 'next',
+  )
+  await waitFor(() => harness.service.store.listPendingQuestions().some((i) => i.callId === callId))
+
+  const persisted = harness.service.store.listPendingQuestions().find((i) => i.callId === callId)!
+  assert.ok(persisted, '提问要落盘')
+  assert.equal(persisted.questions[0]!.id, 'q1')
+  assert.deepEqual(
+    persisted.questions[0]!.options!.map((option) => option.label),
+    ['不提交', '一起提交'],
+    '选项也要落盘，方便直接照着选',
+  )
+
+  // 模拟重启：先确认 waiter 已登记，再清零（进程内状态），落盘记录与卡点还在
+  await waitFor(() => (harness.service as any).questionWaiters.has(callId))
+  ;(harness.service as any).questionWaiters.clear()
+  await harness.service.store.putBlocker({
+    id: 'blk_q_persist',
+    sessionId: 'worker-q3',
+    kind: 'question',
+    severity: 'warning',
+    status: 'notified',
+    signature: 'question:call_q_persist',
+    summary: '要不要一起提交？',
+    neededAction: '回答这个提问',
+    evidence: { questions: [{ id: 'q1', question: '要不要一起提交？' }] },
+    detectedAt: Date.now(),
+    lastSeenAt: Date.now(),
+    reminderCount: 1,
+    relatedCallId: callId,
+  } as any)
+
+  // 重启后管家再答：必须明确失败并把卡点标成「到界面回答」
+  harness.ctx.userQuestions.answer = async () => false
+  const out = await harness.service.resolveBlocker('blk_q_persist', 'answer', '一起提交', 'butler-chat')
+  assert.equal(out.ok, false)
+  assert.equal(out.reason, 'question_not_held')
+
+  const marked = harness.service.store.getBlocker('blk_q_persist')!
+  assert.equal((marked.evidence as any).needsUiAnswer, true)
+  const snapshot = await harness.service.snapshot()
+  const row = (snapshot.pendingQuestions ?? []).find((item) => item.callId === callId)
+  assert.ok(row, '快照要能看到这条待答提问')
+  assert.equal(row!.needsUiAnswer, true, '快照要标出「需到界面回答」')
+  assert.deepEqual(
+    row!.questions[0]!.options!.map((option) => option.label),
+    ['不提交', '一起提交'],
   )
 })

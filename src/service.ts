@@ -68,6 +68,7 @@ import type {
   HardStatus,
   ManagedSession,
   Meta,
+  PendingQuestionRecord,
   Plan,
   PolicyStatsView,
   ProgressNoticeRecord,
@@ -242,6 +243,10 @@ export class SuperagentService {
 
   private async init(): Promise<void> {
     await this.restorePendingNotices()
+    // I-36 A：重启后内存 waiter 归零，凡是仍在的待答提问都只能去界面回答。
+    for (const item of this.store.listPendingQuestions()) {
+      await this.markQuestionNeedsUiAnswer(item.callId, '进程重启：内存中的应答句柄已丢失')
+    }
     this.meta = await this.store.getMeta()
     this.meta.startedAt = this.version.startedAt
     await this.store.saveMeta(this.meta)
@@ -1024,6 +1029,22 @@ export class SuperagentService {
     }
     if (rows.length === 0) return undefined
     return rows.sort((a, b) => b.count - a.count)
+  }
+
+  /** 快照里的待答提问（I-36 A）：带正文与选项，needsUiAnswer 明确标出。 */
+  private pendingQuestionsView(): PendingQuestionRecord[] | undefined {
+    const items = this.store
+      .listPendingQuestions()
+      .filter((item) =>
+        this.store
+          .listBlockers()
+          .some(
+            (blocker) =>
+              blocker.relatedCallId === item.callId &&
+              (blocker.status === 'open' || blocker.status === 'notified'),
+          ),
+      )
+    return items.length > 0 ? items : undefined
   }
 
   private flushButlerNotices(agent: any): void {
@@ -2616,6 +2637,63 @@ export class SuperagentService {
     this.queueEmit()
   }
 
+  /** 收到提问就落盘（I-36 A）：重启后据此知道「有这么个提问没答」。 */
+  private async rememberPendingQuestion(input: {
+    callId: string
+    sessionId: string
+    questions: any[]
+  }): Promise<void> {
+    const items = this.store
+      .listPendingQuestions()
+      .filter((item) => item.callId !== input.callId)
+    items.push({
+      callId: input.callId,
+      sessionId: input.sessionId,
+      at: now(),
+      questions: (input.questions ?? []).map((question) => ({
+        id: question?.id,
+        question: question?.question,
+        header: question?.header,
+        options: (question?.options ?? []).map((option: any) => ({
+          label: option?.label,
+          description: option?.description,
+        })),
+      })),
+    })
+    await this.store.savePendingQuestions(items.slice(-50))
+  }
+
+  /** 已答/已取消：从落盘记录里摘掉。 */
+  private async forgetPendingQuestion(callId: string): Promise<void> {
+    const items = this.store.listPendingQuestions().filter((item) => item.callId !== callId)
+    await this.store.savePendingQuestions(items)
+  }
+
+  /**
+   * 标记「只能到界面回答」（I-36 A）。
+   *
+   * 触发：本进程不持有该提问句柄（重启后 / 非本进程发起），宿主 answer() 又拒绝。
+   * 效果：落盘记录标 needsUiAnswer，对应卡点写进 evidence 并改 neededAction，
+   * 面板/明细页可见——绝不静默。
+   */
+  private async markQuestionNeedsUiAnswer(callId: string, reason: string): Promise<void> {
+    const items = this.store.listPendingQuestions()
+    const index = items.findIndex((item) => item.callId === callId)
+    if (index >= 0 && !items[index]!.needsUiAnswer) {
+      items[index] = { ...items[index]!, needsUiAnswer: true }
+      await this.store.savePendingQuestions(items)
+    }
+    for (const blocker of this.store.listBlockers()) {
+      if (blocker.relatedCallId !== callId) continue
+      if (blocker.status !== 'open' && blocker.status !== 'notified') continue
+      const evidence = { ...(blocker.evidence ?? {}), needsUiAnswer: true, needsUiAnswerReason: reason }
+      blocker.evidence = evidence
+      blocker.neededAction = '该提问只能到界面上回答（管家代答通道够不着）'
+      await this.store.putBlocker(blocker)
+    }
+    this.queueEmit()
+  }
+
   private async answerQuestion(agent: any, request: any, next: any): Promise<any> {
     if (this.isButlerAgent(agent) || !this.isRootAgent(agent)) return next()
     const sessionId = String(agent.id)
@@ -2642,6 +2720,7 @@ export class SuperagentService {
         questionId: String(planIntent.id ?? 'plan'),
         approve: String(planIntent.intent?.approve ?? 'Approve'),
       })
+      await this.rememberPendingQuestion({ callId, sessionId, questions })
       this.queueEmit()
       void this.evaluateSession(sessionId)
       return new Promise((resolve, reject) => {
@@ -2673,6 +2752,7 @@ export class SuperagentService {
         }
       })
     }
+    await this.rememberPendingQuestion({ callId, sessionId, questions })
     const runtime = this.runtimes.get(sessionId) ?? (await this.ensureRuntime(sessionId))
     runtime.questions.set(callId, { callId, questions, at: now(), state: 'open' })
     return new Promise((resolve, reject) => {
@@ -2723,6 +2803,7 @@ export class SuperagentService {
         ? answer
         : answerForQuestions(pending?.questions as any, rawText)
       waiter.resolve(payload)
+      await this.forgetPendingQuestion(callId)
       await this.resolveBlockersBy(
         (blocker) => blocker.relatedCallId === callId,
         '问题已回答',
@@ -2759,6 +2840,11 @@ export class SuperagentService {
           )
       const accepted = await this.ctx.userQuestions.answer(agent, callId, payload)
       if (accepted === false) {
+        // I-36 A：本进程不持有这个提问 → 落盘标记 + 卡点标「到界面回答」，不清卡点。
+        await this.markQuestionNeedsUiAnswer(
+          callId,
+          '本进程没有持有该提问的应答句柄（重启前发起或非本进程发起）',
+        )
         // 绝不能当成功：不清卡点、返回可执行的原因。
         await this.store.appendAudit({
           sessionId: blocker.sessionId,
@@ -2771,9 +2857,9 @@ export class SuperagentService {
         })
         return {
           ok: false,
-          reason: 'question_not_pending',
+          reason: 'question_not_held',
           message:
-            '这个提问仍在前台等待（插件没有持有它的应答通道），answer 通道无法送达。请在界面上直接回答，或先取消这个提问再重试。',
+            '该提问不由本进程持有（可能是重启前发起的），管家代答送不进去。请在界面上直接回答；卡点已标注「到界面回答」，并带上提问正文与选项。',
         }
       }
       await this.resolveBlockersBy(
@@ -4003,6 +4089,7 @@ export class SuperagentService {
       blockerNotices,
       progressNotices,
       pendingNotices: this.pendingNoticesView(),
+      pendingQuestions: this.pendingQuestionsView(),
       sources: this.sourceStatus(),
       resolvedBlockers,
       plans,

@@ -1,4 +1,4 @@
-import type { Approval, AuditEntry, Blocker, Dispatch, ManagedSession, Meta, Plan, ProgressNoticeRecord, Project, Thread } from './types.js';
+import type { Approval, AuditEntry, Blocker, Dispatch, ManagedSession, Meta, Plan, ProgressNoticeRecord, PendingQuestionRecord, Project, Thread } from './types.js';
 /** 判断一个外部来源的会话 id 能不能安全落库。 */
 export declare function isSafeRecordKey(key: string): boolean;
 export declare const STORAGE_SPEC: any;
@@ -43,6 +43,12 @@ export declare class Store {
         butlerSessionId: string;
         payload: any;
     }>): Promise<void>;
+    /**
+     * 待回答提问落盘（I-36 A）：存在 `meta` 表的 `pendingQuestions` 键下，不新增表。
+     * 重启后据此把卡点标成「请到界面回答」。
+     */
+    listPendingQuestions(): PendingQuestionRecord[];
+    savePendingQuestions(items: PendingQuestionRecord[]): Promise<void>;
     listProjects(): Project[];
     getProject(key: string): Project | undefined;
     putProject(project: Project): Promise<void>;

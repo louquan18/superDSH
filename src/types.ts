@@ -387,6 +387,26 @@ export interface SessionView {
   missing?: boolean
 }
 
+/**
+ * 待回答的提问（I-36 A）：插件收到提问时落盘。
+ *
+ * 用途：进程重启后内存里的 waiter 没了，靠这份记录知道「有这么个提问还没答」，
+ * 并把对应卡点标成「请到界面回答」——而不是装作能代答。
+ */
+export interface PendingQuestionRecord {
+  callId: string
+  sessionId: string
+  at: number
+  /** true = 本进程已经不持有这个提问（重启后 / 非本进程发起），只能去界面回答。 */
+  needsUiAnswer?: boolean
+  questions: Array<{
+    id?: string
+    question?: string
+    header?: string
+    options?: Array<{ label?: string; description?: string }>
+  }>
+}
+
 export interface Snapshot {
   generatedAt: number
   /**
@@ -430,6 +450,11 @@ export interface Snapshot {
   dispatches: Dispatch[]
   approvals: Approval[]
   audit: AuditEntry[]
+  /**
+   * 待回答的提问（I-36 A）：含正文与选项，`needsUiAnswer=true` 表示管家代答通道够不着，
+   * 只能到界面回答。面板用它显式提示，避免「卡着但没人知道」。
+   */
+  pendingQuestions?: PendingQuestionRecord[]
   /**
    * 还没送达的提醒（I-34 补）：落盘队列里按目标管家分组的积压。
    * 存在的意义是「既没送达也要看得见」——UI 用它提示「有 N 条通知没送到」。

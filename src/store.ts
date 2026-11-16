@@ -7,6 +7,7 @@ import type {
   Meta,
   Plan,
   ProgressNoticeRecord,
+  PendingQuestionRecord,
   Project,
   Thread,
 } from './types.js'
@@ -214,6 +215,21 @@ export class Store {
 
   async savePendingNotices(items: Array<{ butlerSessionId: string; payload: any }>): Promise<void> {
     await this.table<any>('meta').put('pendingNotices', { schemaVersion: 1, items })
+  }
+
+  /**
+   * 待回答提问落盘（I-36 A）：存在 `meta` 表的 `pendingQuestions` 键下，不新增表。
+   * 重启后据此把卡点标成「请到界面回答」。
+   */
+  listPendingQuestions(): PendingQuestionRecord[] {
+    const table = this.table<any>('meta')
+    const existing = table.get('pendingQuestions')
+    const items = Array.isArray(existing?.items) ? existing.items : []
+    return items as PendingQuestionRecord[]
+  }
+
+  async savePendingQuestions(items: PendingQuestionRecord[]): Promise<void> {
+    await this.table<any>('meta').put('pendingQuestions', { schemaVersion: 1, items })
   }
 
   listProjects(): Project[] {

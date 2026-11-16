@@ -164,6 +164,8 @@ export declare class SuperagentService {
      * 目的就是「既没送达，也要看得见」——否则队列静默堆积就是死信箱。
      */
     private pendingNoticesView;
+    /** 快照里的待答提问（I-36 A）：带正文与选项，needsUiAnswer 明确标出。 */
+    private pendingQuestionsView;
     private flushButlerNotices;
     /** §6.4：只对管家派发的任务推进度，手动 session 只更新面板。 */
     private noteProgress;
@@ -297,6 +299,18 @@ export declare class SuperagentService {
         message: string;
     }>;
     private finishApproval;
+    /** 收到提问就落盘（I-36 A）：重启后据此知道「有这么个提问没答」。 */
+    private rememberPendingQuestion;
+    /** 已答/已取消：从落盘记录里摘掉。 */
+    private forgetPendingQuestion;
+    /**
+     * 标记「只能到界面回答」（I-36 A）。
+     *
+     * 触发：本进程不持有该提问句柄（重启后 / 非本进程发起），宿主 answer() 又拒绝。
+     * 效果：落盘记录标 needsUiAnswer，对应卡点写进 evidence 并改 neededAction，
+     * 面板/明细页可见——绝不静默。
+     */
+    private markQuestionNeedsUiAnswer;
     private answerQuestion;
     answerQuestionByCall(callId: string, answer: any, by?: 'user' | 'butler-chat'): Promise<{
         ok: boolean;
