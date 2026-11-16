@@ -264,6 +264,31 @@ settleTtl:
 
 > 另外两条同源修复：`awaiting_approval` / `awaiting_answer` 期间不再报「没进展」（等的是人，不是 worker）；已报过阶段结束的派发把巡检间隔退避为 2 倍，并把文案从「做到哪了」换成「要不要销账」。
 
+### 真唤醒与提醒改投（I-32 部分 / I-34 补）
+
+**只对「确实需要人」的卡点真唤醒管家**（起 turn），其余类型仍然只 inject（不唤醒）：
+
+| 卡点类型 | 投递方式 |
+|---|---|
+| `approval` / `decision` / `error` | `source.prompt` → 真起一轮，管家会主动开口 |
+| 其余（`stall` / `repeated_failure` / `question` / 计划待审 …） | `inject`（不唤醒，进上下文等下一次 turn） |
+
+四道闸 + 三层防自激：
+
+- 同签名只唤醒一次（签名落盘到 `dispatch.progress.woke` 或 `blocker.woke`）
+- 每派发最多 3 次；同一派发两次唤醒至少间隔 5 分钟；管家 `running` 时不打断
+- 防自激：① 卡点在管家自己的会话里 → **绝不唤醒**；② 签名先落盘再发送（失败退回 inject，不会反复重试）；③ running 闸天然避免「被唤醒的那一轮里再唤醒自己」
+
+```yaml
+blockerWake:
+  enabled: true
+  kinds: ['approval', 'decision', 'error']
+  maxPerDispatch: 3
+  minGapMs: 300000
+```
+
+**离线队列的改投**（I-34 补）：目标管家已不存在时，**只有同一 projectKey（同工作区）**才把积压提醒改投给当前管家；不同工作区或无法判断的**留在队列不丢**，并在快照 `pendingNotices` 与面板「明细 · 未送达提醒」里显示（目标是否在线、条数、来源工作区、最近一条摘要）。
+
 ## 自动决策准确率与 shadow（P1）
 
 系统替你做过的判断（发提醒、拒命令、派任务）现在**都进台账，并且事后会被判定对错**——用来回答一个问题：这条规则现在还准吗。

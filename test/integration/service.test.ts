@@ -1088,7 +1088,9 @@ test('多个管家：派发任务的进度只发给派出它的管家，手动 s
 })
 
 test('卡点提醒带结构化 source：客户端据此渲染可点按钮', async () => {
-  const { harness, cwd } = await boot()
+  // I-32 部分起 approval 默认走「真唤醒」，这条测的是**注入通道**的结构化协议，
+  // 所以显式关掉真唤醒，让它走 inject。
+  const { harness, cwd } = await boot({ blockerWake: { enabled: false } })
   const { butler } = await withButler(harness, cwd)
   const at = Date.now()
   const blocker: any = {
@@ -2809,4 +2811,227 @@ test('I-33(4)：gate_confirm 下方案不阻塞，但对话里要明确说清「
     .join('\n')
   assert.match(texts, /本次不阻塞/, '要说清不阻塞')
   assert.match(texts, new RegExp(String(submitted.planId)), '要给出 planId 便于去找正文')
+})
+
+// ---------------------------------------------------------------- I-32 部分：真唤醒
+
+/** prompt 的 content 是 [{type:'text',text}]，取出来做断言。 */
+function promptText(item: any): string {
+  const content = item?.content
+  if (Array.isArray(content)) return content.map((block: any) => String(block?.text ?? '')).join('\n')
+  return String(content ?? '')
+}
+
+function approvalBlocker(id: string, sessionId: string, extra: any = {}): any {
+  const at = Date.now()
+  return {
+    id,
+    sessionId,
+    kind: 'approval',
+    severity: 'warning',
+    status: 'open',
+    signature: `approval:${id}`,
+    summary: '在等审批：bash rm -rf build',
+    neededAction: '允许或拒绝 bash',
+    evidence: { toolName: 'bash', callId: `call-${id}`, risk: 'high' },
+    detectedAt: at,
+    lastSeenAt: at,
+    reminderCount: 0,
+    relatedApprovalId: `apv-${id}`,
+    relatedCallId: `call-${id}`,
+    ...extra,
+  }
+}
+
+test('I-32 部分：审批类卡点会「真唤醒」管家（起 turn），而不是只 inject', async () => {
+  const { harness, cwd } = await boot()
+  const { butlerId } = await withButler(harness, cwd)
+  const blocker = approvalBlocker('bl_w1', 'worker-w1')
+  await harness.service.store.putBlocker(blocker)
+  await (harness.service as any).maybeRemind(blocker)
+
+  const woke = harness.prompts.filter((item) => item.sessionId === butlerId)
+  assert.equal(woke.length, 1, '审批要真的起一次 turn 叫管家')
+  assert.match(promptText(woke[0]), /自动唤醒/)
+  assert.match(promptText(woke[0]), /审批/)
+  // 唤醒之后不再重复注入同一条（避免用户看到两遍）
+  assert.equal(
+    (harness.agents.get(butlerId)!.injected as any[]).length,
+    0,
+    '走唤醒就不该同时再 inject',
+  )
+})
+
+test('I-32 部分：只对 approval / decision / error 唤醒，其它类型仍走注入', async () => {
+  const { harness, cwd } = await boot()
+  const { butlerId, butler } = await withButler(harness, cwd)
+
+  // 用 stall：它既不在唤醒名单里，也不在 P1 的 shadow 名单里，能干净地验证「注入通道」
+  const stalling: any = approvalBlocker('bl_w2', 'worker-w2', {
+    kind: 'stall',
+    relatedApprovalId: undefined,
+  })
+  await harness.service.store.putBlocker(stalling)
+  await (harness.service as any).maybeRemind(stalling)
+  assert.equal(harness.prompts.filter((i) => i.sessionId === butlerId).length, 0, 'stall 不该唤醒')
+  assert.ok((butler.injected as any[]).length >= 1, '但仍要进注入通道')
+
+  for (const kind of ['decision', 'error']) {
+    const b = approvalBlocker(`bl_w_${kind}`, 'worker-w3', { kind, relatedApprovalId: undefined })
+    await harness.service.store.putBlocker(b)
+    await (harness.service as any).maybeRemind(b)
+  }
+  assert.equal(
+    harness.prompts.filter((i) => i.sessionId === butlerId).length,
+    2,
+    'decision / error 各自唤醒一次',
+  )
+})
+
+test('I-32 部分：同签名只唤醒一次（落盘），重复扫描不再叫醒', async () => {
+  const { harness, cwd } = await boot()
+  const { butlerId } = await withButler(harness, cwd)
+  const blocker = approvalBlocker('bl_w3', 'worker-w4')
+  await harness.service.store.putBlocker(blocker)
+
+  await (harness.service as any).maybeRemind(blocker)
+  assert.equal(harness.prompts.filter((i) => i.sessionId === butlerId).length, 1)
+
+  // 模拟下一轮扫描重新检测到同一条：清掉节流/计数，让签名闸成为唯一拦截
+  const fresh = harness.service.store.getBlocker('bl_w3')!
+  fresh.reminderCount = 0
+  fresh.lastRemindedAt = undefined
+  await harness.service.store.putBlocker(fresh)
+  await (harness.service as any).maybeRemind(fresh)
+  assert.equal(
+    harness.prompts.filter((i) => i.sessionId === butlerId).length,
+    1,
+    '同签名第二次不该再唤醒',
+  )
+})
+
+test('I-32 部分：每派发最多唤醒 3 次', async () => {
+  const { harness, cwd } = await boot({ blockerWake: { minGapMs: 0 } })
+  const { butlerId } = await withButler(harness, cwd)
+  harness.addAgent('worker-w5', cwd)
+  await harness.service.listSessions(true)
+  await harness.service.dispatchExecute(
+    { kind: 'reuse', sessionId: 'worker-w5', reason: 't' },
+    '跑一下',
+  )
+
+  for (let i = 0; i < 5; i++) {
+    const blocker = approvalBlocker(`bl_wq${i}`, 'worker-w5')
+    await harness.service.store.putBlocker(blocker)
+    await (harness.service as any).maybeRemind(blocker)
+  }
+  assert.equal(
+    harness.prompts.filter((item) => item.sessionId === butlerId).length,
+    3,
+    '同一派发最多唤醒 3 次',
+  )
+})
+
+test('I-32 部分：管家 running 时绝不打断，只投不叫', async () => {
+  const { harness, cwd } = await boot()
+  const { butlerId, butler } = await withButler(harness, cwd)
+  butler.status = 'running'
+  const blocker = approvalBlocker('bl_w6', 'worker-w6')
+  await harness.service.store.putBlocker(blocker)
+  await (harness.service as any).maybeRemind(blocker)
+
+  assert.equal(harness.prompts.filter((i) => i.sessionId === butlerId).length, 0, '不能打断当前 turn')
+  assert.ok((butler.injected as any[]).length >= 1, '但要留下上下文')
+})
+
+// ---------------------------------------------------------------- I-34 补：改投规则
+
+/** 造一条「待投递提醒」，让 noticeProjectKey 能取到来源会话。 */
+function pendingItem(noticeSessionId: string, text = '【SuperAgent 提醒】测试', butlerSessionId = 'session-dead') {
+  return {
+    butlerSessionId,
+    payload: {
+      text,
+      source: {
+        kind: 'superagent-notice',
+        form: 'notice',
+        summary: text,
+        notice: { id: 'n1', at: 1, kind: 'blocker', category: 'approval', severity: 'warning', sessionId: noticeSessionId },
+      },
+    },
+  }
+}
+
+async function seedManagedSession(harness: Harness, id: string, projectKey: string, isButler = false) {
+  await harness.service.store.putSession({
+    sessionId: id,
+    title: id,
+    projectKey,
+    source: 'dsh',
+    isButler,
+    firstSeenAt: 1,
+    lastSeenAt: 1,
+  } as any)
+}
+
+test('I-34 补：目标管家不存在 + 同 projectKey → 改投给当前管家', async () => {
+  const { harness, cwd } = await boot()
+  const { butlerId, butler } = await withButler(harness, cwd)
+  const project = harness.service.ensureProjectForCwd(cwd).key
+  await seedManagedSession(harness, butlerId, project, true)
+  await seedManagedSession(harness, 'worker-same', project)
+
+  // 造一个「目标管家已不存在」的队列条目，来源是同项目的会话
+  const service: any = harness.service
+  service.pendingButlerNotices.set('session-dead', [pendingItem('worker-same').payload])
+
+  service.flushButlerNotices(butler)
+  assert.equal(
+    (butler.injected as any[]).length,
+    1,
+    '同项目应当改投成功（有注入）',
+  )
+  assert.equal(service.pendingButlerNotices.get('session-dead'), undefined, '改投后原键应清空')
+  const snapshot = await harness.service.snapshot()
+  assert.equal(snapshot.pendingNotices ?? undefined, undefined, '没有残留就不该有未送达标记')
+})
+
+test('I-34 补：不同 projectKey → 不改投、留在队列、快照标未送达', async () => {
+  const { harness, cwd } = await boot()
+  const { butlerId, butler } = await withButler(harness, cwd)
+  const project = harness.service.ensureProjectForCwd(cwd).key
+  await seedManagedSession(harness, butlerId, project, true)
+  await seedManagedSession(harness, 'worker-other', 'cwd_other_project')
+
+  const service: any = harness.service
+  service.pendingButlerNotices.set('session-dead', [pendingItem('worker-other').payload])
+
+  service.flushButlerNotices(butler)
+  assert.equal((butler.injected as any[]).length, 0, '不同项目不该改投')
+  assert.equal(
+    service.pendingButlerNotices.get('session-dead')?.length,
+    1,
+    '不改投也不能丢，必须留在队列里',
+  )
+  const snapshot = await harness.service.snapshot()
+  const row = (snapshot.pendingNotices ?? [])[0]
+  assert.ok(row, '未送达必须在快照里可见')
+  assert.equal(row!.count, 1)
+  assert.equal(row!.targetAlive, false, '目标管家已不在')
+  assert.ok(!row!.projectKey || row!.projectKey === 'cwd_other_project')
+})
+
+test('I-34 补：目标管家还活着时按原键投递（不改行为）', async () => {
+  const { harness, cwd } = await boot()
+  const { butlerId, butler } = await withButler(harness, cwd)
+  const project = harness.service.ensureProjectForCwd(cwd).key
+  await seedManagedSession(harness, butlerId, project, true)
+
+  const service: any = harness.service
+  // 条目原定发给这个管家自己
+  service.pendingButlerNotices.set(butlerId, [pendingItem('worker-x', '【SuperAgent 提醒】原键', butlerId).payload])
+
+  service.flushButlerNotices(butler)
+  assert.equal((butler.injected as any[]).length, 1, '原键要照常投递')
+  assert.equal(service.pendingButlerNotices.get(butlerId), undefined)
 })

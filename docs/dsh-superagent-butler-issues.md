@@ -66,7 +66,7 @@
 | I-29 | `butler_dispatch` 的决策字段名与工具说明不一致，传错时报错误导 | ✅ 已修复 | P2 |
 | I-30 | 审批在界面上不可见，且审批路由不分层 | 📥 待处理 | P1 |
 | I-31 | MCP 工具全走审批致自动化验证不可行 | ✅ 已修复 | P1 |
-| I-32 | 审批链上没有主动方 | 📥 待处理 | P0 |
+| I-32 | 审批链上没有主动方 | 🔧 进行中 | P0 |
 | I-33 | 计划只能去侧栏明细看，对话里无法审批 | ✅ 已修复 | P1 |
 | I-34 | 提醒送达无持久化，管家离线即丢且同签名不重发 | ✅ 已修复 | P0 |
 | I-35 | 计划 scope 绝对路径与匹配相对路径错位，计划内写入被误判计划外 | ✅ 已修复 | P1 |
@@ -86,7 +86,7 @@
 - **备注**：2026-11-12 A 组验收时由用户提出；与 I-11（job_kill 归属免审批，已修的其实是 (a) 的一个特例）同源，本条把它一般化；与 I-29（报错不可诊断）同属「宿主 ↔ 用户之间的信息断层」。优先级 P1：不阻塞代码执行，但会让人工审批变成瓶颈、并诱发盲点。
 
 ### I-32 审批链上没有主动方：worker 不告知、管家不提醒、用户看不见，只能靠人偶然发问
-- **状态**：📥 待处理
+- **状态**：🔧 进行中（(1) 主动上报 + (3) 主动开口已做；(2) LLM 代审判权 allow/deny/escalate 未做）
 - **现象**：用户原话（2026-11-13）：「管家管理的 worker 需要审批，用户侧看不见任何提示需要审批，管家也不会主动提醒用户，而且也只能通过管家对话进行审批。理想的应该是 worker 通知管家需要审批，然后管家拦截一部分自动放行，这里可以调用大模型思考权限安全，需要用户审批的由管家发消息给用户。」实测佐证：A 组真机验证派发 `dsp_0bf52c3be5f441e8` 自 2026-11-12 19:50 至 2026-11-13 11:33 前后产生 4 条审批卡点——`blk_590c348ae9414999`（`new_page`）、`blk_e3ab1bf8551044b1`（`take_snapshot`）、`blk_1ce25e0ee8604a76`（`fill`）、`blk_53d4c239d8514de5`（`take_snapshot`），**每一条都存在但界面上零提示**，全靠管家在聊天里口头转述才被发现，第一条挂了 14 小时。结构性缺陷：审批 → 管家 → 用户 这条链上**没有任何一步是主动的**——worker 遇审批不会告知管家，管家不运行就不会开口，用户不问就永远不知道。另有一个连带故障：审批挂起时 turn 被冻结，**队列里的新指令不会被消费**（本次管家连发 3 条「收尾」指令全部卡在 `queuedCount`，最后只能靠「拒绝审批」把 turn 撬开才读到）。
 - **修复方法**：三层，建议按 (1)→(2)→(3) 推进 —
   (1) **主动上报**：worker 遇到审批时，插件必须产生一条**用户可见的提醒卡片**（复用 `superagent-notice` + `progressNotices` 通道），带「需要你审批」语义与 `dispatchId`，**不依赖管家是否在运行**。
@@ -96,6 +96,50 @@
 - **备注**：与 I-30、I-31 同源但**问的是三件不同的事**——I-30 问「审批看不看得见、该谁批」，I-31 问「每步都批导致自动化验证跑不完」，本条问「**审批链上没有主动方**：worker 不报、管家不问、用户不知」。与 I-31 叠加时后果最严重：一条自动化任务可以无限期停摆而无人知晓（本次 14 小时实例）。优先级 **P0**：不是体验问题，是「任务卡死且无人发现」的可靠性缺口。2026-11-13 记录。
 
 > 待新增：发现即记，不要攒着。按上面的四字段模板追加到本节末尾，编号取当前最大 +1，并同步快速索引。
+
+
+**补充（2026-11-13 真机复核：管家为什么始终收不到「待审批」）**
+
+**(1) 三条通道的实测行为（带行号）**
+
+- **通道 A 注入提醒（会生成，但不唤醒）**：审批 blocker 与其它卡点走同一条 `maybeRemind`（`src/service.ts:1846`，调用点 `1787` / `1815`），**没有按 kind 过滤**，所以审批会正常生成 notice 并投递（`injectButlerNotice` `895` → `injectMessage` `955` → `agent.inject`）。
+  但 dsh 对 `agent.inject` 的契约是明文写死的：**“Queue model-facing context for the next pre-step without waking the driver … idle drivers leave it pending until follow-up or steering wakes them”**（`@deepseek-ai/dsh-agent/lib/types/runtime-types.d.ts:237-244`）。也就是说：**管家空闲时，注入只是躺在待处理上下文里，不产生任何 turn**，要等用户下一条消息的 pre-step 才会被取走。这是「管家没感知」的直接原因。
+- **通道 B 唤醒（完全不覆盖审批）**：唯一真正会起 turn 的投递是 `maybeWakeButler`（`src/service.ts:1658`）→ `sendToSession`（`3231`）→ `source.prompt`（`3233`）。但它**全仓只有一个调用点**：`evaluateProgress` 末尾（`1572`）；入参 `events` 来自 `detectProgress`，事件类型只有 `milestone | stage_end | blocker_resolved | watchdog`（`src/progress.ts:21`），`decideWake` 再按 `config.progress.wake.kinds`（默认 `['stage_end','watchdog']`）过滤（`src/progress.ts:446`）。**blocker / approval 从不在事件类型里，因此审批打开永远不会触发唤醒** —— I-32 原文记的根因仍然成立。
+- **通道 C 快照（用户可见，但不喂模型）**：`blockerNotices` 由 `blockers.map(buildBlockerNotice)` 生成（`src/service.ts:3712`），**没有 kind 过滤**，审批确实会进快照；但它是给 UI 的轮询数据，模型侧不会主动读，除非管家跑一次 `butler_inbox`——而管家要跑必须先有 turn（回到通道 A/B 的死结）。客户端侧还有两个约束：`NoticeDock` 只在**管家会话**渲染（`src/client/index.ts:1530`，`1536` 判 `sessionId === butlerId`，否则 `return null`），且要求 notice 带非 `open_session` 的动作。
+
+**(2) 真机数据佐证（本插件存储，只读）**
+
+- 用户提到的三条审批都存在，且最终都由 `butler-chat` 放行——正是「用户开口之后才批」：`apv_2492d38ef2264f5e`（edit，11-13T04:00）、`apv_3a8472bd87f64e26`（edit，04:02）、`apv_8297409211814971`（bash，06:12）。
+- 对应审批 blocker **确实跑过提醒**（`reminderCount` 有增长）：`blk_baf960ea542245dd`（关联 apv_8297409211814971）`reminderCount=1`、`notifiedAt=06:12`；另有 `blk_faba95d25c08489d` `reminderCount=3`（06:32→07:32，每 30 分钟重试一次，依然没人被叫醒）。
+- 结论：**提醒管线是通的（生成、记账、计数、注入都发生了），坏的是「注入 ≠ 唤醒」这一步**。这也解释了为什么 I-34 修完「重启不丢」症状依旧：I-34 只保证内容不丢，没解决「没人读」。
+
+**(3) 实际发生 vs 代码声称（不一致点）**
+
+- README 与代码注释写「提醒用 inject，不唤醒管家」——这句本身正确，但**没写后果**：对空闲管家，inject 等价于「不投递」，要等用户下次开口才被 pre-step 取走。于是「插件产生了提醒」与「管家看到了提醒」是两件事，而审计里 `reminderCount++` 会让人误以为已送达。
+- I-34 之后新增的 `delivered/queued` 区分只覆盖「投递彻底失败」（`notify_deferred`），**不覆盖「投递成功但没人消费」**这一状态。
+
+**(4) 结论与归属**
+
+- **与 I-32 同源，不新开条目**（不新增 I-36）：这是「审批 → 管家 → 用户」链上缺主动方在**实现层**的落点——唤醒通道只接进度事件。
+- 修复方向仍按本条 (1)(2)(3)；**最小可用改动**是把 blocker/approval 纳入唤醒通道（新增一种 wake 事件 kind，复用 `sendToSession` + `prompt` 这类会起 turn 的投递），但必须带配额/节流与「不重复播报」约束，否则会退化成 I-21 那类假唤醒。
+- 本次只补证据，**状态保持 📥 待处理**（未修）。
+
+
+**部分实现（2026-11-16，用户拍板「投递可达 + 真唤醒」这半边）**
+
+- **只对需要人拍板的三类真唤醒**：`blockerWake.kinds` 默认 `['approval','decision','error']`。命中时走 `wakeSession()`（`source.prompt`，会起 turn），其余类型仍走 `injectButlerNotice`（不唤醒）。
+- **四道闸**（`shouldWakeForBlocker()`）：
+  1. 同签名只唤醒一次：签名 `blockerwake:<kind>:<id>` 落盘进 `dispatch.progress.woke`（有派发）或 `blocker.woke`（无派发），与原有 wake 去重同一套语义；
+  2. 每派发配额 `maxPerDispatch`（默认 3，数已落盘的 `blockerwake:` 签名）；
+  3. 同一 dispatch 两次唤醒间隔 ≥ `minGapMs`（默认 5 分钟）；
+  4. 管家 `running` 时不打断。
+- **防自激（三层，缺一不可）**：
+  1. **会话闸**：卡点所在会话若是管家自己的会话（`isButlerSessionId`），**绝不唤醒**——管家自己的审批永远不会反过来叫醒自己；
+  2. **先落盘再发送**：签名在 `wakeSession()` 之前写入，发送失败也不会下一轮立刻重发（失败则退回 inject，内容不丢）；审计记 `action:'wake'` 并标明「已送达/投递失败」；
+  3. **着色闸**：管家 running 时不唤醒，而管家被唤醒后的那一轮正是 running，天然不会在自身回合内再次触发。
+- **未做**：第 (2) 项 LLM 代审（把命令原文交模型判 allow/deny/escalate）——按用户要求本轮不做。
+- **验证**：集成 5 条（approval 真唤醒且不重复 inject / 仅三类唤醒、stall 仍走注入 / 同签名第二次不再唤醒 / 每派发最多 3 次 / running 时不打断）。既有「结构化 source」用例改为显式关掉真唤醒以继续覆盖注入通道。
+  **反向验证**：去掉类型闸（任何卡点都唤醒）→ 「只对三类唤醒」用例变红，单行改回。
 
 ## 🔧 进行中
 
@@ -290,6 +334,40 @@
 - **备注**：集成 1 条：管家离线 → 提醒落盘 → 清空内存模拟重启 → 从存储重建 → 卡片仍在快照里。
   **反向验证**：把 `queueButlerNotice()` 里那句 `this.persistPendingNotices()` 去掉（退回纯内存）→ 该用例变红。2026-11-13。
 
+
+**复现实例（2026-11-13，投递层仍未闭环）**
+
+- **实例**：计划 `plan_22a5239a3b424bd8`（「重启司南 BA(:8198 新jar催办60s) + roac-fe(:8120) 供真机验证」，目标会话 `session-13b291a3`）提交后停在 `pending_review`，卡点 `blk_a9e563baf754409e`。
+- **落盘已生效（I-34 修复验证通过）**：提醒卡确实生成并写进了 `~/.dsh/storages/superagent/meta/pendingNotices.json` 的**第 29 条**（目标 butler = `session-caac7193-0ac4-4c88-a125-02b7e9c050c4`，正文以「提交了计划：重启司南 BA(:8198…」开头）。
+- **关键区分**：**落盘 ≠ 送达**。这条从入队到现在**一直没被消费**（复核时仍在第 29 条），所以断点是「**没人 flush**」，而**不是**「flush 了但只进 inject 等待队列」。用户在 GUI 上看不到卡片/按钮，只能靠管家口头转述才放行——与 I-32 叠加后的最终表现。
+
+**断点定位（文件:行号，只读调查）**
+
+1. **队列按目标管家 id 分区，且不会改投**：`flushButlerNotices()`（`src/service.ts:971`）只取 `'*'` 与 `get(String(agent.id))` 两个键，取完就 `delete` 这两个键（`978-979`）。第 29 条的 key 是 `session-caac7193…`，只要**这个管家 agent 没被重新创建**，条目就永远等不到 flush——即便别的管家正在跑。
+2. **flush 只有两个触发点，没有兜底**：`handleAgentCreated`（`src/service.ts:342`）与「preset 切换到管家」（`512`）。`restorePendingNotices()`（`944`，在 `init()` 里 `242` 调用）只把条目读回内存，**不尝试投递**；也没有定时/扫描兜底。于是「agent 早就存在、不会再触发 `agent/created`」这个场景完全没人管。
+3. **第二道门（即使 flush 了）**：投递走 `injectMessage`（`955`）→ `agent.inject`，按 dsh 契约**不唤醒**（`@deepseek-ai/dsh-agent/lib/types/runtime-types.d.ts:237-244`，详见 I-32 补充）。本例连第一道门都没过，但修完 (1)(2) 之后仍会撞上这道门。
+4. **现状佐证（死信箱）**：落盘队列现有 **31 条、跨 8 个管家 id**（`6385aa8d` / `0ea5dfde` / `213d854a` / `5fce294a` / `705d07d1` / `e479722d` / `fc0f4e6f` / `caac7193`），其中多条指向已不再活跃的管家——队列**只增不减**，说明「投递 → 可见」这一步在真实使用中持续失效。
+
+**修复方法补充（补完「投递 → 可见」）**
+
+1. **解除目标死锁（最关键）**：flush 时若条目原定管家 id 对应的 agent 不存在，**改投给当前活跃管家**（先按 `butlerSessionIds()`，再退到 `ensureButler()`），并在汇总里注明「原定发往 X，已改投到本会话」；条目保留 `originButlerId` 便于追溯。否则旧 key 永远无人认领。
+2. **启动即补投 + 定时兜底**：`restorePendingNotices()` 之后，对当前**已存在**的管家 agent 立即 flush 一次；再在 `scan()`（`src/service.ts:3793` 起，15s 周期）里加一条「队列非空且有活跃管家 → flush」，覆盖「agent 早于 restore 存在、不会再有 `agent/created`」的场景。
+3. **把「送达」定义清楚，别混两个通道**：`inject` 只负责把上下文放进模型（不唤醒）；**用户可见性由通道 C（快照 `blockerNotices`）保证**。所以 flush 的验收标准是「条目从队列消失 + 目标会话 inject 成功」，而「用户真的看见」要靠 I-32 的 (1)(3)（真正唤醒 / 管家主动开口）。两者必须分别验收，否则还会出现「审计说发了、用户没看见」。
+4. **可观测 + 清理**：`flushButlerNotices()` / `restorePendingNotices()` 各写一条审计（`notify_flush` / `notify_restored`，记条数、目标 id、是否改投）；`diagnostics` 暴露**按目标分组**的队列深度（现在只有总数），并对长期无人认领的条目给出 `stale` 标记，避免死信箱无声堆积。
+
+
+**用户拍板与实现（2026-11-16）**
+
+用户采纳「flush 允许改投」但加三道约束，并同意「投递后真唤醒管家」。落地如下：
+
+1. **改投只在目标管家确实不存在时发生**：`flushButlerNotices()`（`src/service.ts`）先按原键取走 `'*'` 与自己的 key；再遍历其它 key，仅当 `agentOf(key)` 为空（目标 agent 已不存在）才考虑改投。目标还活着时**行为完全不变**（按原键等它自己来取）。
+2. **必须同 projectKey 才允许改投**：条目来源工作区由 `noticeProjectKey()`（从 `notice.sessionId` → managed session `.projectKey`，不新造字段）取，与当前管家 `butlerProjectKey()` 比较；不相等则**不改投**。
+3. **绝不静默丢弃**：不满足改投条件的条目留在队列（不 delete），并在快照新增 `pendingNotices` 暴露「按目标管家分组的积压」（含 `count` / `targetAlive` / `projectKey` / `sample`）；面板「明细」页新增「未送达提醒」表。改投成功的条目会在汇总文案里注明「原定发往 X，已改投到本会话」。
+4. 配套：新增 `pendingNoticesView()` 供快照使用；改投不改变原条目的 `text`/`source`，客户端仍按结构化 notice 渲染按钮。
+
+**验证**：集成 3 条（同项目改投成功 / 不同项目留在队列且快照标未送达 / 目标还活着按原键投递）。
+**反向验证**：① 把「同项目」判断改成恒真 → 「不同 projectKey」用例变红；② 把 `keep.push(payload)` 删掉（改为丢弃）→ 同一用例变红（队列被清空）。两处均单行改回。
+
 ### I-35 计划 scope 绝对路径与匹配用的相对路径错位，计划内文件写操作被误判「计划外写操作」
 - **状态**：✅ 已修复
 - **现象**：已批准计划里明明写了 `PageServiceImpl.java`（绝对路径），worker 不带 `sandbox_permissions` 的 `edit` 却被判「计划外写操作」并弹审批。根因：`matchPlanPath()` 把目标转成**相对 projectRoot** 再与**绝对** scope pattern 做 glob，恒不命中。
@@ -378,3 +456,6 @@
 | 2026-11-13 | 补充 I-34 技术细节（三条知情通道、内存队列、记账顺序、落盘对照、扫描边界、未确认项），条目不增；清单仍 34 条 |
 | 2026-11-13 | A 组第二轮：I-31/I-33/I-34/I-35 → ✅（I-33 第 (3) 项「回复即批」未做，已注明）。清单仍 34 条 |
 | 2026-11-13 | B 组：I-22（/superagent doctor + config 写入通道评估）、I-23（复核无积压）→ ✅。清单仍 34 条，待决策分区已清空 |
+| 2026-11-13 | I-32 补充真机复核：审批提醒走 `agent.inject`（契约明文「不唤醒」）+ 唤醒通道只接进度事件 → 管家对审批零感知。附三条实例与 reminderCount 证据。不新开条目，仍 34 条 |
+| 2026-11-13 | 补充 I-34 复现实例：plan_22a5239a3b424bd8 / blk_a9e563baf754409e 的提醒在 pendingNotices 第 29 条**落盘但从未被消费** → 断点是「没人 flush」（按目标管家 id 分区 + 无兜底 flush），并写入修复方法补充。条目数不变 |
+| 2026-11-16 | I-34 补：改投三约束（同项目才改投/目标还活着按原键/不丢且快照可见）；I-32 部分完成（(1)(3) 真唤醒已做，(2) LLM 代审未做）。条目数不变 |

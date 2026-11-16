@@ -285,6 +285,11 @@ export interface Blocker {
   resolution?: string
   /** 归属的活（P2）。 */
   threadId?: string
+  /**
+   * 已经用它唤醒过管家的签名（与 `dispatch.progress.woke` 同一套语义：先落盘、同签名只一次）。
+   * 没有派发的卡点没有 dispatch 可挂，就落在自己身上。
+   */
+  woke?: string[]
   relatedPlanId?: string
   relatedApprovalId?: string
   relatedCallId?: string
@@ -425,6 +430,20 @@ export interface Snapshot {
   dispatches: Dispatch[]
   approvals: Approval[]
   audit: AuditEntry[]
+  /**
+   * 还没送达的提醒（I-34 补）：落盘队列里按目标管家分组的积压。
+   * 存在的意义是「既没送达也要看得见」——UI 用它提示「有 N 条通知没送到」。
+   */
+  pendingNotices?: Array<{
+    targetButlerId: string
+    count: number
+    /** 目标管家是否还在（false = 没人认领，正在等改投或等它回来）。 */
+    targetAlive: boolean
+    /** 通知来源的工作区，改投时用来判断是否同项目。 */
+    projectKey?: string
+    /** 最早一条的摘要，便于辨认是什么通知。 */
+    sample?: string
+  }>
   /**
    * 「一件件活」（P2）。只给面板看：状态、参与会话、未结束派发/卡点数。
    * `thread.enabled=false` 时为空数组，老客户端忽略这个字段也不影响。
@@ -720,6 +739,19 @@ export interface Config {
     minutes: number
   }
   /**
+   * 卡点真唤醒（I-32 部分）：只有「确实需要人」的卡点才起 turn 叫管家，
+   * 其余类型仍走 inject（不唤醒）。
+   */
+  blockerWake: {
+    enabled: boolean
+    /** 允许真唤醒的卡点类型。 */
+    kinds: string[]
+    /** 同一派发最多唤醒几次。 */
+    maxPerDispatch: number
+    /** 同一派发两次唤醒的最小间隔。 */
+    minGapMs: number
+  }
+  /**
    * MCP 工具（I-31）：同 server 同方法在本会话内批过一次后，后续同类调用不再逐次问。
    * 默认开；关掉就恢复「每次都要批」。
    */
@@ -811,6 +843,8 @@ export const DEFAULT_CONFIG: Config = {
   dispatchRetryLimit: 3,
   planReview: { allowReadOnlyBash: false },
   auditAllLowRisk: false,
+  // I-32 部分：只对「确实要人拍板」的三类开真唤醒
+  blockerWake: { enabled: true, kinds: ['approval', 'decision', 'error'], maxPerDispatch: 3, minGapMs: 300_000 },
   mcp: { batchApprove: true },
   settleSuggest: { enabled: true, cooldownMs: 6 * 60 * 60_000 },
   settleTtl: { enabled: false, minutes: 24 * 60 },

@@ -992,6 +992,45 @@
     return h(
       'div',
       null,
+      (snapshot.pendingNotices ?? []).length > 0
+        ? h(
+            Section,
+            {
+              title: `未送达提醒 · ${(snapshot.pendingNotices ?? []).reduce(
+                (sum: number, row: any) => sum + (row.count ?? 0),
+                0,
+              )} 条`,
+            },
+            [
+              h(
+                'table',
+                { className: 'sab-table', key: 'pending' },
+                h(
+                  'thead',
+                  null,
+                  h('tr', null, ['目标管家', '条数', '目标在线', '工作区', '最近一条'].map((label) =>
+                    h('th', { key: label }, label),
+                  )),
+                ),
+                h(
+                  'tbody',
+                  null,
+                  (snapshot.pendingNotices ?? []).map((row: any) =>
+                    h(
+                      'tr',
+                      { key: row.targetButlerId },
+                      h('td', null, row.targetButlerId === '*' ? '（还没有管家）' : String(row.targetButlerId).slice(0, 20)),
+                      h('td', null, String(row.count)),
+                      h('td', null, row.targetAlive ? '是' : '否'),
+                      h('td', null, row.projectKey ? '同项目' : '未知'),
+                      h('td', null, String(row.sample ?? '')),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          )
+        : null,
       h(
         Section,
         { title: `卡点 · ${(snapshot.blockers ?? []).length}` },

@@ -48,6 +48,8 @@ export declare class SuperagentService {
     private wakeCounts;
     /** 全局上一次唤醒时间，用于 minGapMs 节流。 */
     private lastWakeAt;
+    /** 卡点真唤醒的节流时间（按 dispatch / blocker），进程内即可：签名本身已落盘去重。 */
+    private lastBlockerWakeAt;
     private bashReviewer;
     /** 本进程内看到的 `agent-preset/selected`：会话在第一轮前切换 preset 时，header 不会更新。 */
     private selectedPresets;
@@ -143,7 +145,25 @@ export declare class SuperagentService {
     private persistPendingNotices;
     /** 启动时从存储重建未读队列（I-34）。 */
     private restorePendingNotices;
+    /** 通知来源的工作区（从 notice.sessionId → managed session.projectKey 取，不新造字段）。 */
+    private noticeProjectKey;
+    /** 某个管家会话的工作区。 */
+    private butlerProjectKey;
     private injectMessage;
+    /**
+     * 把队列里的提醒投给这个管家（I-34 补）。
+     *
+     * 三条规则：
+     * 1. **原键优先**：`'*'` 与自己的 key 照旧取走、删除；
+     * 2. **同项目才改投**：目标管家 agent 已不存在时，只有「通知来源的 projectKey == 当前管家 projectKey」才改投给它，
+     *    避免把 A 工作区的通知塞进 B 工作区的管家；
+     * 3. **绝不静默丢弃**：不满足改投条件的条目留在队列里（快照会标成「未送达」），不 delete。
+     */
+    /**
+     * 还没送达的提醒（I-34 补）：按目标管家分组，供快照/面板展示。
+     * 目的就是「既没送达，也要看得见」——否则队列静默堆积就是死信箱。
+     */
+    private pendingNoticesView;
     private flushButlerNotices;
     /** §6.4：只对管家派发的任务推进度，手动 session 只更新面板。 */
     private noteProgress;
@@ -209,7 +229,28 @@ export declare class SuperagentService {
     private maybeWakeButler;
     private evaluateSession;
     private syncBlockers;
+    /**
+     * 卡点是否该「真唤醒」管家（I-32 部分 (1)(3)：主动上报 + 主动开口）。
+     *
+     * 四道闸 + 两道防自激：
+     *  - 闸① 同签名只唤醒一次（签名落盘，与 `dispatch.progress.woke` 同一套语义）；
+     *  - 闸② 每派发配额 `maxPerDispatch`（数已落盘的 `blockerwake:` 签名）；
+     *  - 闸③ 同一 dispatch 两次唤醒间隔 ≥ `minGapMs`；
+     *  - 闸④ 管家正在 running 时不打断它的 turn；
+     *  - 防自激①：卡点所在会话如果就是管家自己的会话，**绝不唤醒**（否则管家自己产生的审批会反复叫醒自己）；
+     *  - 防自激②：签名在**发送之前**落盘，发送失败也不会下一轮立刻重发。
+     */
+    private shouldWakeForBlocker;
+    /** 先落盘签名，再发送：签名在，就不会因为发送失败而陷入「醒了没成功→下一轮再醒」的环。 */
+    private recordBlockerWake;
+    /** 会真正起 turn 的投递（与 inject 相对）。返回是否送出去。 */
+    private wakeSession;
     private maybeRemind;
+    /**
+     * 提醒记账（两条路径共用）：唤醒成功与注入/入队都算「这一轮提醒发出去了」。
+     * 只有「既没唤醒也没注入、连队列都没进」才不记账（由调用方提前 return）。
+     */
+    private finishReminderAccounting;
     /** 卡点提醒归属于哪条规则；不可迁移的硬卡点（审批/提问/计划/决策）不参与策略引擎。 */
     private reminderRuleFor;
     /** 规则命中率（30s 缓存）：每条决策都全量扫审计太浪费。 */

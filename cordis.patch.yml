@@ -25,5 +25,24 @@
             name: '@deepseek-ai/dsh-tool-fs-search'
             config:
               sampleOverCapGlobResults: false
+          # 上下文压缩：宿主在 web 平面已关掉全局那份（dsh-web-app/cordis.patch.yml:546-553），
+          # 改由每个 preset 自己挂，这里与 standard 预设保持一致。
+          - id: butler-compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: butler-compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+              - id: butler-command-compact
+                name: '@deepseek-ai/dsh-command-compact'
+              - id: butler-tool-result-pruner
+                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+                config:
+                  thresholdChars: 8192
+                  headChars: 4096
+                  tailChars: 1024
           - id: butler-agent
             name: '@local/dsh-superagent-butler/butler'
