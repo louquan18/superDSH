@@ -250,6 +250,24 @@
 
 **残留 / 已知**：`wake_silent` 只在**进程内**检测（`wakeWatch` 不落盘）：如果 dsh 在 turn 结束前重启，这一次静默不会被记账。若要跨重启，需要把它落盘（与 I-34 同类做法），留给后续。
 
+
+**实现补充（2026-11-16 第二轮，按用户补充要求）**
+
+1. **改投与 flush 的「同 projectKey」约束合并**：`resolveButlerTarget(preferred, noticeSessionId)` 现在先看
+   「派发者是否在线」→ 不在线时在**在线候选**里**优先找同 projectKey** 的管家 → 找不到才跨工作区退回活跃/任一在线，
+   并把 `crossProject` 标记出来。这样既保留了 I-34 的「同工作区才改投」原则，又不会因为找不到同项目管家而彻底投不出去。
+   `reason` 会区分 `active-butler(same-project)` / `online-butler(same-project)` / `(cross-project)` 四种。
+2. **审计三要素结构化**：`AuditEntry` 新增 `fromButlerId` / `toButlerId` / `redirectReason` / `crossProject` 四个可选字段，
+   `notify_redirect` 一次写全「原目标 / 最终目标 / 原因 / 是否跨工作区」，不必从 note 文本里抠；note 仍保留人读版本。
+3. **唤醒同样走 projectKey 优先**：`shouldWakeForBlocker()` 把 `blocker.sessionId` 传给解析函数，唤醒目标与投递目标一致。
+
+**关于「强制开口」的信号可得性（如实说明）**：插件**能**拿到「该轮有没有可见输出」的信号——
+订阅的是宿主 `session/event` 里的 `assistant/message`，用 `extractText(data.message.content)` 取文本判断非空。
+因此做法是：唤醒时登记 `wakeWatch`（目标管家 + 时间 + 来源），`assistant/message` 有文本即视为已开口，
+`turn/end` 结算时未开口写审计 `wake_silent`。**限制**：`wakeWatch` 是进程内状态，turn 结束前重启会漏记；
+另外只对**卡点唤醒**（approval/decision/error）要求开口，`stage_end` 这类**进度唤醒不要求**——
+进度唤醒的 prompt 明确说「只在确实需要推动时才行动」，静默是合法行为，若也强制开口会变成新的噪音。
+
 ## 🔧 进行中
 
 （暂无）
@@ -573,3 +591,4 @@
 | 2026-11-16 | I-36 方案 A：待答提问落盘（meta.pendingQuestions）+ 重启后标记「需到界面回答」+ 快照/明细页带正文与选项；已知限制（无法事后认领 open 提问，需上游 API）已写入备注。条目数不变 |
 | 2026-11-16 | 新增 I-37：审批提醒/真唤醒发给「派发者管家」而非「当前活跃管家」（今天 14 条审批全部 remind、仅 2 条 wake，且目标是与用户不同的管家会话）；附「新代码已生效」更正与三条通道实测。清单 35 → 36 条 |
 | 2026-11-16 | I-37 实现：提醒/唤醒目标改为「在线优先」（派发者→活跃管家→任一在线）+ 改投审计 notify_redirect；唤醒 prompt 强制开口；新增 wake_silent 检测（进程内）。条目数不变 |
+| 2026-11-16 | I-37 补充：改投与 I-34 的「同 projectKey」约束合并（同项目优先、跨项目标记 crossProject）；审计三要素结构化（fromButlerId/toButlerId/redirectReason/crossProject）；说明 wake_silent 的信号来源与限制。条目数不变 |

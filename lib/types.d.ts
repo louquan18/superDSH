@@ -275,6 +275,12 @@ export interface AuditEntry {
     callId?: string;
     argsSummary?: string;
     note?: string;
+    /** 改投三要素（I-37）：原目标 / 最终目标 / 原因，结构化可查，不必从 note 里抠。 */
+    fromButlerId?: string;
+    toButlerId?: string;
+    redirectReason?: string;
+    /** 改投是否跨工作区（true = 没找到同 projectKey 的在线管家）。 */
+    crossProject?: boolean;
     /**
      * 产生这条决策的代码版本与配置指纹（P0 版本戳）。
      * 由 `Store.setVersion()` 统一注入，调用方不传。

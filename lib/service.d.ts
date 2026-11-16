@@ -148,6 +148,8 @@ export declare class SuperagentService {
      * 不能等下一次 flush。
      */
     private resolveButlerTarget;
+    /** 从会话 id 取它所属工作区（通知来源用）。 */
+    private noticeProjectKeyForSession;
     injectButlerNotice(payload: ButlerNoticePayload | string, butlerSessionId?: string): Promise<{
         delivered: boolean;
         queued: boolean;

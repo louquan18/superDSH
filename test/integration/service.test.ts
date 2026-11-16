@@ -3259,3 +3259,63 @@ test('I-37：唤醒后一句话不说 → 记 wake_silent；说了就不记', as
     '开了口就不该记缺陷',
   )
 })
+
+test('I-37：改投优先同 projectKey；没有再跨项目并标记；审计三要素可查', async () => {
+  const { harness, cwd } = await boot()
+  const { butlerId, butler } = await withButler(harness, cwd)
+  const projectA = harness.service.ensureProjectForCwd(cwd).key
+  await seedManagedSession(harness, butlerId, projectA, true)
+
+  // 另一个在线管家，属于另一个工作区
+  const second = harness.addAgent('butler-other', cwd, 'superagent-butler')
+  await seedManagedSession(harness, 'butler-other', 'cwd_other_project', true)
+  // 通知来源也在那个工作区
+  await seedManagedSession(harness, 'worker-other', 'cwd_other_project')
+
+  const notice = (text: string) =>
+    ({
+      text,
+      source: {
+        kind: 'superagent-notice' as const,
+        form: 'notice' as const,
+      summary: text,
+      notice: {
+        id: 'n1',
+        at: Date.now(),
+        kind: 'blocker',
+        category: 'approval',
+        severity: 'warning',
+          sessionId: 'worker-other',
+        },
+      },
+    })
+
+  // ① 同项目优先：派发者不在线 → 应改投 butler-other（同工作区），而不是活跃管家
+  await harness.service.injectButlerNotice(notice('【SuperAgent 提醒】同项目改投') as any, 'session-dead')
+  assert.ok((second.injected as any[]).length >= 1, '同工作区的在线管家优先')
+  assert.equal(
+    (butler.injected as any[]).length,
+    0,
+    '有同工作区候选时不该跨项目投给活跃管家',
+  )
+  const firstAudit = harness.service.store
+    .listAudit()
+    .filter((item) => item.action === 'notify_redirect')
+    .at(-1)!
+  assert.equal(firstAudit.fromButlerId, 'session-dead', '审计要有原目标')
+  assert.equal(firstAudit.toButlerId, 'butler-other', '审计要有最终目标')
+  assert.equal(firstAudit.redirectReason, 'online-butler(same-project)')
+  assert.equal(firstAudit.crossProject, false)
+
+  // ② 没有同项目候选 → 跨项目改投给活跃管家，并标记 crossProject
+  harness.agents.delete('butler-other')
+  await harness.service.injectButlerNotice(notice('【SuperAgent 提醒】跨项目改投') as any, 'session-dead')
+  assert.ok((butler.injected as any[]).length >= 1, '没有同项目候选时要退回活跃管家')
+  const secondAudit = harness.service.store
+    .listAudit()
+    .filter((item) => item.action === 'notify_redirect')
+    .at(-1)!
+  assert.equal(secondAudit.toButlerId, butlerId)
+  assert.equal(secondAudit.crossProject, true, '跨工作区必须标记出来')
+  assert.match(String(secondAudit.note), /跨工作区/)
+})

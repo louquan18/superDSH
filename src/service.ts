@@ -933,26 +933,54 @@ export class SuperagentService {
    * 与 I-34 的「离线队列改投」不同：这里是**实时投递**，必须在投递前就选对目标，
    * 不能等下一次 flush。
    */
-  private resolveButlerTarget(preferred?: string): {
+  private resolveButlerTarget(
+    preferred?: string,
+    noticeSessionId?: string,
+  ): {
     target?: string
     reason: string
     redirectedFrom?: string
+    crossProject?: boolean
   } {
-
     if (preferred && this.agentOf(preferred)) {
       return { target: preferred, reason: 'preferred-alive' }
     }
+    // 改投候选：活跃管家优先，其次其它在线管家
     const active = this.butlerId
-    if (active && active !== preferred && this.agentOf(active)) {
-      return { target: active, reason: 'active-butler', redirectedFrom: preferred }
-    }
+    const candidates: string[] = []
+    if (active && active !== preferred) candidates.push(active)
     for (const id of this.butlerSessionIds()) {
-      if (id === preferred) continue
-      if (this.agentOf(id)) {
-        return { target: id, reason: 'any-online-butler', redirectedFrom: preferred }
+      if (id === preferred || candidates.includes(id)) continue
+      candidates.push(id)
+    }
+    const online = candidates.filter((id) => this.agentOf(id))
+    if (online.length === 0) return { reason: 'none-online', redirectedFrom: preferred }
+
+    // 与 flush 的「同 projectKey」约束保持一致：**先找同工作区的相对管家**，
+    // 找不到才跨工作区改投（并标记 crossProject，便于事后追责）。
+    const wanted = noticeSessionId ? this.noticeProjectKeyForSession(noticeSessionId) : undefined
+    if (wanted) {
+      const sameProject = online.find((id) => this.butlerProjectKey(id) === wanted)
+      if (sameProject) {
+        return {
+          target: sameProject,
+          reason: sameProject === active ? 'active-butler(same-project)' : 'online-butler(same-project)',
+          redirectedFrom: preferred,
+        }
       }
     }
-    return { reason: 'none-online' }
+    const target = online[0]!
+    return {
+      target,
+      reason: target === active ? 'active-butler(cross-project)' : 'online-butler(cross-project)',
+      redirectedFrom: preferred,
+      crossProject: true,
+    }
+  }
+
+  /** 从会话 id 取它所属工作区（通知来源用）。 */
+  private noticeProjectKeyForSession(sessionId: string): string | undefined {
+    return this.store.getSession(String(sessionId))?.projectKey
   }
 
   async injectButlerNotice(
@@ -984,7 +1012,10 @@ export class SuperagentService {
       return { delivered, queued: true, targets: known.length }
     }
 
-    const resolved = this.resolveButlerTarget(notice.butlerSessionId)
+    const resolved = this.resolveButlerTarget(
+      notice.butlerSessionId,
+      (notice.source as any)?.notice?.sessionId,
+    )
     if (!resolved.target) {
       // 一个管家都不在线：落到派发者（或公共）队列，等它回来补投；同时留痕。
       this.queueButlerNotice(notice.butlerSessionId, notice)
@@ -1003,7 +1034,12 @@ export class SuperagentService {
         action: 'notify_redirect',
         by: 'butler-auto',
         sessionId: (notice.source as any)?.notice?.sessionId,
-        note: `原定 ${String(resolved.redirectedFrom).slice(0, 20)} 不在线（${resolved.reason}）→ 改投 ${String(resolved.target).slice(0, 20)}`,
+        // 改投三要素结构化落库（I-37）：原目标 / 最终目标 / 原因，外加是否跨工作区
+        fromButlerId: resolved.redirectedFrom,
+        toButlerId: resolved.target,
+        redirectReason: resolved.reason,
+        crossProject: resolved.crossProject === true,
+        note: `原定 ${String(resolved.redirectedFrom).slice(0, 20)} 不在线（${resolved.reason}）→ 改投 ${String(resolved.target).slice(0, 20)}${resolved.crossProject ? '（跨工作区）' : ''}`,
       })
     }
     const agent = this.agentOf(resolved.target)
@@ -2056,7 +2092,10 @@ export class SuperagentService {
       return { wake: false, reason: 'butler-self', signature }
     }
     // I-37：唤醒目标也必须是在线管家（顺序同投递：派发者 → 活跃 → 任一在线）
-    const resolved = this.resolveButlerTarget(dispatch?.fromButlerSessionId ?? this.butlerId ?? undefined)
+    const resolved = this.resolveButlerTarget(
+      dispatch?.fromButlerSessionId ?? this.butlerId ?? undefined,
+      blocker.sessionId,
+    )
     const butlerId = resolved.target
     if (!butlerId) return { wake: false, reason: 'no-online-butler', signature }
     if (this.agentOf(butlerId)?.status === 'running') {

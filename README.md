@@ -331,7 +331,8 @@ policy:
 派发者管家（且在线） → 当前活跃管家 → 任一在线管家 → 都不在线才入队
 ```
 
-- **改投留痕**：写审计 `notify_redirect`，内容为「原定 X 不在线（原因）→ 改投 Y」，不再静默。
+- **改投留痕（结构化）**：审计 `notify_redirect` 同时写 `fromButlerId`（原目标）/ `toButlerId`（最终目标）/ `redirectReason` / `crossProject`，note 里另有人读版本。
+- **与离线队列的同项目约束一致**：在线候选里**优先同 projectKey**；找不到才跨工作区退回，并标 `crossProject: true`。
 - **唤醒必须在线**：目标没有 agent 时直接不唤醒（以前会把 `prompt` 发给冷会话，凭空拉起一个你看不见的管家）。
 - **唤醒后必须开口**：唤醒 prompt 是硬要求——处理完至少发一条用户可见消息；确实无事也要发最短状态。若该轮没有任何助手文本，`turn/end` 时写审计 `wake_silent`（= 记为缺陷）。
 
