@@ -10,6 +10,7 @@ import type {
   PendingQuestionRecord,
   Project,
   Thread,
+  WakeWatchRecord,
 } from './types.js'
 import { now, shortId } from './util.js'
 
@@ -230,6 +231,21 @@ export class Store {
 
   async savePendingQuestions(items: PendingQuestionRecord[]): Promise<void> {
     await this.table<any>('meta').put('pendingQuestions', { schemaVersion: 1, items })
+  }
+
+  /**
+   * 唤醒开口监测落盘（I-37 2A）：存在 `meta` 表的 `wakeWatch` 键下，不新增表。
+   * 重启后据此补记「唤醒后未开口」，避免进程中途重启就漏账。
+   */
+  listWakeWatch(): WakeWatchRecord[] {
+    const table = this.table<any>('meta')
+    const existing = table.get('wakeWatch')
+    const items = Array.isArray(existing?.items) ? existing.items : []
+    return items as WakeWatchRecord[]
+  }
+
+  async saveWakeWatch(items: WakeWatchRecord[]): Promise<void> {
+    await this.table<any>('meta').put('wakeWatch', { schemaVersion: 1, items })
   }
 
   listProjects(): Project[] {

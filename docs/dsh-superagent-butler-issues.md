@@ -248,7 +248,18 @@
 
 **反向验证**：① 同时禁用「活跃管家」与「任一在线」两条回退 → 「改投」与「唤醒目标」两条用例变红；② 把 `wake_silent` 审计写成恒不触发 → 「唤醒后不说话要被抓到」用例变红。均改回。
 
-**残留 / 已知**：`wake_silent` 只在**进程内**检测（`wakeWatch` 不落盘）：如果 dsh 在 turn 结束前重启，这一次静默不会被记账。若要跨重启，需要把它落盘（与 I-34 同类做法），留给后续。
+~~**残留 / 已知**：`wake_silent` 只在进程内检测，turn 结束前重启会漏记。~~ **已修复（2026-11-16 2A）**：改为落盘到 `meta.wakeWatch`，并在 `init()` 做对账——重启后仍能补记，不漏账。
+
+**2A 实现细节（2026-11-16）**
+
+- **落盘载体**：`meta` 表的 `wakeWatch` 键（沿用 `pendingNotices` / `pendingQuestions` 的惯例，**不新增表**、不动 `STORAGE_SPEC` 版本）。记录字段：`butlerSessionId / at / kind / blockerId / spoke`。
+- **写入点**：`src/service.ts` 的 `persistWakeWatch()`——唤醒成功时（`spoke:false`）、观察到有文本的 `assistant/message` 时（`spoke:true`）、`turn/end` 结算清空时，三处都会落盘。
+- **跨重启不漏账**：`init()` 调 `reconcileWakeWatch()`：对落盘里残留的记录，先尝试用 `source.readEvents(butlerSessionId)` 找该时间之后有没有**带文本的** `assistant/message`——
+  - 找到 → 视为已开口，清记录、不记缺陷；
+  - 读不到 / 读取失败 → **补记** `wake_silent`，note 写明「进程重启补记，未能确知该轮是否开口」。
+  这是**有意选择「宁可不漏、宁可误报」**：漏账等于缺陷看不见，误报只是多一条可复核的审计。
+- **验证**：集成 2 条（唤醒即落盘 / 观察到开口会更新 / turn 结束未开口记缺陷；重启后未开口记录被补记且清空）。
+  **反向验证**：① `persistWakeWatch()` 退回纯内存 → 第一条用例红；② `reconcileWakeWatch()` 直接 return → 重启补记用例红。均单行改回。
 
 
 **实现补充（2026-11-16 第二轮，按用户补充要求）**
@@ -592,3 +603,4 @@
 | 2026-11-16 | 新增 I-37：审批提醒/真唤醒发给「派发者管家」而非「当前活跃管家」（今天 14 条审批全部 remind、仅 2 条 wake，且目标是与用户不同的管家会话）；附「新代码已生效」更正与三条通道实测。清单 35 → 36 条 |
 | 2026-11-16 | I-37 实现：提醒/唤醒目标改为「在线优先」（派发者→活跃管家→任一在线）+ 改投审计 notify_redirect；唤醒 prompt 强制开口；新增 wake_silent 检测（进程内）。条目数不变 |
 | 2026-11-16 | I-37 补充：改投与 I-34 的「同 projectKey」约束合并（同项目优先、跨项目标记 crossProject）；审计三要素结构化（fromButlerId/toButlerId/redirectReason/crossProject）；说明 wake_silent 的信号来源与限制。条目数不变 |
+| 2026-11-16 | I-37 2A：`wakeWatch` 落盘到 `meta.wakeWatch` + `init()` 对账补记，修掉「重启会漏记」的已知限制；附两条反向验证。条目数不变 |

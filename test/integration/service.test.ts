@@ -3321,3 +3321,68 @@ test('I-37：改投优先同 projectKey；没有再跨项目并标记；审计�
   assert.equal(secondAudit.crossProject, true, '跨工作区必须标记出来')
   assert.match(String(secondAudit.note), /跨工作区/)
 })
+
+// ---------------------------------------------------------------- I-37 2A：开口监测落盘
+
+test('I-37 2A：唤醒即落盘；观察到开口会更新；turn 结束未开口记 wake_silent', async () => {
+  const { harness, cwd } = await boot()
+  const { butlerId } = await withButler(harness, cwd)
+  const service: any = harness.service
+
+  // 唤醒 → 落盘（spoke=false）
+  service.wakeWatch.set(butlerId, { at: Date.now(), kind: 'approval', id: 'blk_2a', spoke: false })
+  service.persistWakeWatch()
+  await waitFor(() => harness.service.store.listWakeWatch().length === 1)
+  const persisted = harness.service.store.listWakeWatch()[0]!
+  assert.equal(persisted.butlerSessionId, butlerId)
+  assert.equal(persisted.spoke, false, '唤醒时还没开口')
+  assert.equal(persisted.blockerId, 'blk_2a')
+
+  // 观察到助手文本 → 落盘更新为 spoke=true
+  harness.emit(
+    'session/event',
+    { id: butlerId },
+    { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '已放行' }] } } },
+  )
+  await waitFor(() => harness.service.store.listWakeWatch()[0]?.spoke === true)
+  assert.equal(harness.service.store.listWakeWatch()[0]!.spoke, true)
+
+  // turn 结束（已开口）→ 清空且不记缺陷
+  harness.emit('session/event', { id: butlerId }, { type: 'turn/end', data: { reason: { kind: 'completed' } } })
+  await waitFor(() => harness.service.store.listWakeWatch().length === 0)
+  assert.equal(
+    harness.service.store.listAudit().filter((item) => item.action === 'wake_silent').length,
+    0,
+  )
+
+  // 再走一遍：唤醒后直接 turn/end（没开口）→ 记 wake_silent
+  service.wakeWatch.set(butlerId, { at: Date.now(), kind: 'decision', id: 'blk_2b', spoke: false })
+  service.persistWakeWatch()
+  harness.emit('session/event', { id: butlerId }, { type: 'turn/end', data: { reason: { kind: 'completed' } } })
+  await waitFor(() =>
+    harness.service.store.listAudit().some((item) => item.action === 'wake_silent'),
+  )
+  assert.ok(
+    harness.service.store.listAudit().some((item) => item.action === 'wake_silent'),
+    '只查不说要被抓到',
+  )
+})
+
+test('I-37 2A：进程重启后，未开口的记录会被补记（跨重启不漏账）', async () => {
+  const { harness, cwd } = await boot()
+  const { butlerId } = await withButler(harness, cwd)
+  const service: any = harness.service
+
+  // 模拟「唤醒后进程就重启了」：落盘里有记录，内存里没有
+  await harness.service.store.saveWakeWatch([
+    { butlerSessionId: butlerId, at: Date.now() - 60_000, kind: 'approval', blockerId: 'blk_restart', spoke: false },
+  ])
+  service.wakeWatch.clear()
+
+  await service.reconcileWakeWatch()
+  const audits = harness.service.store.listAudit().filter((item) => item.action === 'wake_silent')
+  assert.equal(audits.length, 1, '重启后必须补记，不能漏')
+  assert.match(String(audits[0]!.note), /进程重启补记/)
+  assert.equal(audits[0]!.blockerId, 'blk_restart')
+  assert.equal(harness.service.store.listWakeWatch().length, 0, '补记后要清掉落盘记录')
+})

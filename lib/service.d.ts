@@ -260,6 +260,17 @@ export declare class SuperagentService {
     private shouldWakeForBlocker;
     /** 先落盘签名，再发送：签名在，就不会因为发送失败而陷入「醒了没成功→下一轮再醒」的环。 */
     private recordBlockerWake;
+    /** 把内存里的开口监测整份落盘（I-37 2A）。 */
+    private persistWakeWatch;
+    /**
+     * 启动对账（I-37 2A）：把「唤醒过但没看到开口」的记录补记成 `wake_silent`。
+     *
+     * 语义说明（不假装精确）：重启后**无法确知**上一轮有没有开口——
+     * 能用的信号是会话事件里有没有该时间的 `assistant/message`。能读到就按实际判定；
+     * 读不到（来源不支持 / 读取失败）就**宁可补记**，并在 note 里写明是重启补记，
+     * 避免「只查不说」因为一次重启就彻底漏账。
+     */
+    private reconcileWakeWatch;
     /** 会真正起 turn 的投递（与 inject 相对）。返回是否送出去。 */
     private wakeSession;
     private maybeRemind;

@@ -82,6 +82,7 @@ import type {
   Thread,
   SoftStatus,
   ToolIntent,
+  WakeWatchRecord,
 } from './types.js'
 import {
   asText,
@@ -249,6 +250,8 @@ export class SuperagentService {
 
   private async init(): Promise<void> {
     await this.restorePendingNotices()
+    // I-37 2A：先把「唤醒过但没看到开口」的记录补记掉（跨重启不漏账）
+    await this.reconcileWakeWatch()
     // I-36 A：重启后内存 waiter 归零，凡是仍在的待答提问都只能去界面回答。
     for (const item of this.store.listPendingQuestions()) {
       await this.markQuestionNeedsUiAnswer(item.callId, '进程重启：内存中的应答句柄已丢失')
@@ -388,10 +391,14 @@ export class SuperagentService {
     if (watch) {
       if (type === 'assistant/message') {
         const text = extractText(data?.message?.content ?? data?.content)
-        if (text.trim().length > 0) watch.spoke = true
+        if (text.trim().length > 0 && !watch.spoke) {
+          watch.spoke = true
+          this.persistWakeWatch()
+        }
       }
       if (type === 'turn/end') {
         this.wakeWatch.delete(id)
+        this.persistWakeWatch()
         if (!watch.spoke) {
           void this.store.appendAudit({
             sessionId: id,
@@ -2134,6 +2141,61 @@ export class SuperagentService {
     this.lastBlockerWakeAt.set(key, now())
   }
 
+  /** 把内存里的开口监测整份落盘（I-37 2A）。 */
+  private persistWakeWatch(): void {
+    const items: WakeWatchRecord[] = [...this.wakeWatch.entries()].map(([butlerSessionId, item]) => ({
+      butlerSessionId,
+      at: item.at,
+      kind: item.kind,
+      ...(item.id ? { blockerId: item.id } : {}),
+      spoke: item.spoke,
+    }))
+    void this.store.saveWakeWatch(items).catch(() => undefined)
+  }
+
+  /**
+   * 启动对账（I-37 2A）：把「唤醒过但没看到开口」的记录补记成 `wake_silent`。
+   *
+   * 语义说明（不假装精确）：重启后**无法确知**上一轮有没有开口——
+   * 能用的信号是会话事件里有没有该时间的 `assistant/message`。能读到就按实际判定；
+   * 读不到（来源不支持 / 读取失败）就**宁可补记**，并在 note 里写明是重启补记，
+   * 避免「只查不说」因为一次重启就彻底漏账。
+   */
+  private async reconcileWakeWatch(): Promise<void> {
+    const items = this.store.listWakeWatch()
+    if (items.length === 0) return
+    for (const item of items) {
+      let spoke = item.spoke === true
+      if (!spoke) {
+        try {
+          const readEvents = (this.source as any)?.readEvents
+          if (typeof readEvents === 'function') {
+            const events: any[] = (await readEvents.call(this.source, item.butlerSessionId)) ?? []
+            spoke = events.some((event) => {
+              if (String(event?.type ?? '') !== 'assistant/message') return false
+              if (Number(event?.time ?? 0) < item.at) return false
+              const text = extractText(event?.data?.message?.content ?? event?.data?.content)
+              return text.trim().length > 0
+            })
+          }
+        } catch {
+          spoke = false
+        }
+      }
+      if (!spoke) {
+        await this.store.appendAudit({
+          sessionId: item.butlerSessionId,
+          kind: 'blocker',
+          action: 'wake_silent',
+          by: 'butler-auto',
+          ...(item.blockerId ? { blockerId: item.blockerId } : {}),
+          note: `唤醒后没有观察到用户可见消息（${item.kind} / ${item.blockerId ?? '-'}）——进程重启补记，未能确知该轮是否开口`,
+        })
+      }
+    }
+    await this.store.saveWakeWatch([])
+  }
+
   /** 会真正起 turn 的投递（与 inject 相对）。返回是否送出去。 */
   private async wakeSession(sessionId: string, text: string): Promise<boolean> {
     try {
@@ -2223,6 +2285,7 @@ export class SuperagentService {
           id: blocker.id,
           spoke: false,
         })
+        this.persistWakeWatch()
       }
       if (!woke) {
         // 真唤醒没送出去 → 退回注入/队列，保证内容不丢

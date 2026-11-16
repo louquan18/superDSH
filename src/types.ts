@@ -413,6 +413,23 @@ export interface PendingQuestionRecord {
   }>
 }
 
+/**
+ * 唤醒后「必须开口」的监测记录（I-37 2A）。
+ *
+ * 落盘的原因：进程在 turn 结束前重启时，纯内存的 watch 会丢，导致「只查不说」
+ * 这一次永远不被记账。落盘后重启也能补记（语义见 service.reconcileWakeWatch）。
+ */
+export interface WakeWatchRecord {
+  butlerSessionId: string
+  /** 唤醒发生时间。 */
+  at: number
+  /** 唤醒来源的卡点类型与 id（approval/decision/error + blockerId）。 */
+  kind: string
+  blockerId?: string
+  /** 是否已观察到该轮有助手可见文本。 */
+  spoke: boolean
+}
+
 export interface Snapshot {
   generatedAt: number
   /**
