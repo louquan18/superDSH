@@ -3184,3 +3184,78 @@ test('I-36 A：收到提问就落盘；重启后（waiter 丢失）快照里标�
     ['不提交', '一起提交'],
   )
 })
+
+// ---------------------------------------------------------------- I-37 目标选择与必须开口
+
+test('I-37：派发者不在线 → 改投当前活跃管家并留痕', async () => {
+  const { harness, cwd } = await boot()
+  const { butlerId, butler } = await withButler(harness, cwd)
+
+  // 派发者是一个不存在的管家会话
+  const delivery = await harness.service.injectButlerNotice(
+    { text: '【SuperAgent 提醒】某个 worker 在等审批' },
+    'session-dead-butler',
+  )
+  assert.equal(delivery.delivered, true, '要改投到在线管家，而不是塞进冷队列')
+  assert.ok((butler.injected as any[]).length >= 1, '活跃管家要收到')
+
+  const redirect = harness.service.store
+    .listAudit()
+    .find((item) => item.action === 'notify_redirect')
+  assert.ok(redirect, '改投必须留痕')
+  assert.match(String(redirect!.note), /session-dead-butler/)
+  assert.match(String(redirect!.note), new RegExp(String(butlerId).slice(0, 12)))
+})
+
+test('I-37：唤醒目标也选在线管家（派发者离线时）', async () => {
+  const { harness, cwd } = await boot()
+  const { butlerId } = await withButler(harness, cwd)
+  const decision = (harness.service as any).shouldWakeForBlocker(
+    approvalBlocker('blk_target', 'worker-target'),
+    {
+      id: 'dsp_target',
+      fromButlerSessionId: 'session-dead-butler',
+      progress: { notified: [], woke: [] },
+    },
+  )
+  assert.equal(decision.wake, true)
+  assert.equal(decision.butlerId, butlerId, '要唤醒在线管家，而不是死会话')
+})
+
+test('I-37：唤醒后一句话不说 → 记 wake_silent；说了就不记', async () => {
+  const { harness, cwd } = await boot()
+  const { butlerId } = await withButler(harness, cwd)
+  const service: any = harness.service
+
+  // 情形 A：唤醒后直接 turn/end，没有助手消息
+  service.wakeWatch.set(butlerId, { at: Date.now(), kind: 'approval', id: 'blk_x', spoke: false })
+  harness.emit('session/event', { id: butlerId }, { type: 'turn/end', data: { reason: { kind: 'completed' } } })
+  await waitFor(() =>
+    harness.service.store.listAudit().some((item) => item.action === 'wake_silent'),
+  )
+  assert.ok(
+    harness.service.store.listAudit().some((item) => item.action === 'wake_silent'),
+    '只查 inbox 不开口要被抓到',
+  )
+
+  // 情形 B：唤醒后先发了一条助手消息，再 turn/end
+  const before = harness.service.store
+    .listAudit()
+    .filter((item) => item.action === 'wake_silent').length
+  service.wakeWatch.set(butlerId, { at: Date.now(), kind: 'approval', id: 'blk_y', spoke: false })
+  harness.emit(
+    'session/event',
+    { id: butlerId },
+    {
+      type: 'assistant/message',
+      data: { message: { content: [{ type: 'text', text: 'worker-a 在等审批，已放行' }] } },
+    },
+  )
+  harness.emit('session/event', { id: butlerId }, { type: 'turn/end', data: { reason: { kind: 'completed' } } })
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  assert.equal(
+    harness.service.store.listAudit().filter((item) => item.action === 'wake_silent').length,
+    before,
+    '开了口就不该记缺陷',
+  )
+})

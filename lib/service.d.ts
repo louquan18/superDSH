@@ -50,6 +50,11 @@ export declare class SuperagentService {
     private lastWakeAt;
     /** 卡点真唤醒的节流时间（按 dispatch / blocker），进程内即可：签名本身已落盘去重。 */
     private lastBlockerWakeAt;
+    /**
+     * 唤醒后「必须开口」的监测（I-37）：唤醒时登记，管家 turn 结束时检查这一轮有没有
+     * 产生过用户可见的助手消息；没有就写 `wake_silent` 审计（可查、可统计）。
+     */
+    private wakeWatch;
     private bashReviewer;
     /** 本进程内看到的 `agent-preset/selected`：会话在第一轮前切换 preset 时，header 不会更新。 */
     private selectedPresets;
@@ -135,6 +140,14 @@ export declare class SuperagentService {
      * 传字符串时行为与旧版一致（纯文本提醒）；传 payload 时可以带上结构化 source，
      * 客户端据此把这条消息渲染成一张可点按钮的卡片。
      */
+    /**
+     * 选择提醒/唤醒的目标管家（I-37）。
+     *
+     * 顺序：派发者（且在线）→ 当前活跃管家（且在线）→ 任一在线管家 → 都不在线。
+     * 与 I-34 的「离线队列改投」不同：这里是**实时投递**，必须在投递前就选对目标，
+     * 不能等下一次 flush。
+     */
+    private resolveButlerTarget;
     injectButlerNotice(payload: ButlerNoticePayload | string, butlerSessionId?: string): Promise<{
         delivered: boolean;
         queued: boolean;

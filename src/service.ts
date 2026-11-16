@@ -93,6 +93,7 @@ import {
   isRecoverableTurnError,
   now,
   redact,
+  extractText,
   shortId,
   summarizeArgs,
   truncate,
@@ -181,6 +182,11 @@ export class SuperagentService {
   private lastWakeAt = 0
   /** 卡点真唤醒的节流时间（按 dispatch / blocker），进程内即可：签名本身已落盘去重。 */
   private lastBlockerWakeAt = new Map<string, number>()
+  /**
+   * 唤醒后「必须开口」的监测（I-37）：唤醒时登记，管家 turn 结束时检查这一轮有没有
+   * 产生过用户可见的助手消息；没有就写 `wake_silent` 审计（可查、可统计）。
+   */
+  private wakeWatch = new Map<string, { at: number; kind: string; id: string; spoke: boolean }>()
   private bashReviewer: BashReviewer
   /** 本进程内看到的 `agent-preset/selected`：会话在第一轮前切换 preset 时，header 不会更新。 */
   private selectedPresets = new Map<string, string>()
@@ -375,6 +381,27 @@ export class SuperagentService {
     const data = event?.data ?? {}
     if (type === 'agent-preset/selected' && data?.agentPreset) {
       this.handlePresetSelected(id, String(data.agentPreset))
+    }
+
+    // I-37：唤醒后的「必须开口」监测
+    const watch = this.wakeWatch.get(id)
+    if (watch) {
+      if (type === 'assistant/message') {
+        const text = extractText(data?.message?.content ?? data?.content)
+        if (text.trim().length > 0) watch.spoke = true
+      }
+      if (type === 'turn/end') {
+        this.wakeWatch.delete(id)
+        if (!watch.spoke) {
+          void this.store.appendAudit({
+            sessionId: id,
+            kind: 'blocker',
+            action: 'wake_silent',
+            by: 'butler-auto',
+            note: `唤醒后没有任何用户可见消息（${watch.kind} / ${watch.id}）——违反「必须开口」`,
+          })
+        }
+      }
     }
 
     if (type === 'user/message' && data?.source?.rpcId) {
@@ -899,6 +926,35 @@ export class SuperagentService {
    * 传字符串时行为与旧版一致（纯文本提醒）；传 payload 时可以带上结构化 source，
    * 客户端据此把这条消息渲染成一张可点按钮的卡片。
    */
+  /**
+   * 选择提醒/唤醒的目标管家（I-37）。
+   *
+   * 顺序：派发者（且在线）→ 当前活跃管家（且在线）→ 任一在线管家 → 都不在线。
+   * 与 I-34 的「离线队列改投」不同：这里是**实时投递**，必须在投递前就选对目标，
+   * 不能等下一次 flush。
+   */
+  private resolveButlerTarget(preferred?: string): {
+    target?: string
+    reason: string
+    redirectedFrom?: string
+  } {
+
+    if (preferred && this.agentOf(preferred)) {
+      return { target: preferred, reason: 'preferred-alive' }
+    }
+    const active = this.butlerId
+    if (active && active !== preferred && this.agentOf(active)) {
+      return { target: active, reason: 'active-butler', redirectedFrom: preferred }
+    }
+    for (const id of this.butlerSessionIds()) {
+      if (id === preferred) continue
+      if (this.agentOf(id)) {
+        return { target: id, reason: 'any-online-butler', redirectedFrom: preferred }
+      }
+    }
+    return { reason: 'none-online' }
+  }
+
   async injectButlerNotice(
     payload: ButlerNoticePayload | string,
     butlerSessionId?: string,
@@ -907,26 +963,52 @@ export class SuperagentService {
       typeof payload === 'string'
         ? { text: payload, butlerSessionId }
         : { ...payload, butlerSessionId: payload.butlerSessionId ?? butlerSessionId }
-    const known = this.butlerSessionIds()
-    const targets =
-      notice.butlerSessionId && known.includes(notice.butlerSessionId)
-        ? [notice.butlerSessionId]
-        : known
-    if (targets.length === 0) {
-      // 还没有任何管家：进公共队列（会落盘），等管家出现时补投。
-      this.queueButlerNotice('*', notice)
+    // I-37：目标是「在线的管家」，不是「派发者（可能早已不在线）」。
+    if (!notice.butlerSessionId) {
+      // 没有派发者（手动 session）：广播给所有管家——在线的直接注入，离线的排队等它回来。
+      // 这类通知不属于任何一条派发，广播是既有语义，不要改（I-37 只改「派发者不在线」的情况）。
+      const known = this.butlerSessionIds()
+      if (known.length === 0) {
+        this.queueButlerNotice('*', notice)
+        return { delivered: false, queued: true, targets: 0 }
+      }
+      let delivered = false
+      for (const id of known) {
+        const agent = this.agentOf(id)
+        if (agent) {
+          if (this.injectMessage(agent, notice.text, notice.source)) delivered = true
+        } else {
+          this.queueButlerNotice(id, notice)
+        }
+      }
+      return { delivered, queued: true, targets: known.length }
+    }
+
+    const resolved = this.resolveButlerTarget(notice.butlerSessionId)
+    if (!resolved.target) {
+      // 一个管家都不在线：落到派发者（或公共）队列，等它回来补投；同时留痕。
+      this.queueButlerNotice(notice.butlerSessionId, notice)
+      await this.store.appendAudit({
+        kind: 'blocker',
+        action: 'notify_queued',
+        by: 'butler-auto',
+        note: `没有在线管家，已排队（原定 ${String(notice.butlerSessionId).slice(0, 20)}）`,
+      })
       return { delivered: false, queued: true, targets: 0 }
     }
-    let delivered = false
-    for (const id of targets) {
-      const agent = this.agentOf(id)
-      if (agent) {
-        if (this.injectMessage(agent, notice.text, notice.source)) delivered = true
-      } else {
-        this.queueButlerNotice(id, notice)
-      }
+    if (resolved.redirectedFrom) {
+      // 改投必须留痕：谁不在线 → 最终给了谁。
+      await this.store.appendAudit({
+        kind: 'blocker',
+        action: 'notify_redirect',
+        by: 'butler-auto',
+        sessionId: (notice.source as any)?.notice?.sessionId,
+        note: `原定 ${String(resolved.redirectedFrom).slice(0, 20)} 不在线（${resolved.reason}）→ 改投 ${String(resolved.target).slice(0, 20)}`,
+      })
     }
-    return { delivered, queued: true, targets: targets.length }
+    const agent = this.agentOf(resolved.target)
+    const delivered = agent ? this.injectMessage(agent, notice.text, notice.source) : false
+    return { delivered, queued: true, targets: 1 }
   }
 
   private queueButlerNotice(butlerSessionId: string, notice: ButlerNoticePayload): void {
@@ -1973,8 +2055,10 @@ export class SuperagentService {
     if (this.isButlerSessionId(blocker.sessionId)) {
       return { wake: false, reason: 'butler-self', signature }
     }
-    const butlerId = dispatch?.fromButlerSessionId ?? this.butlerId
-    if (!butlerId) return { wake: false, reason: 'no-butler', signature }
+    // I-37：唤醒目标也必须是在线管家（顺序同投递：派发者 → 活跃 → 任一在线）
+    const resolved = this.resolveButlerTarget(dispatch?.fromButlerSessionId ?? this.butlerId ?? undefined)
+    const butlerId = resolved.target
+    if (!butlerId) return { wake: false, reason: 'no-online-butler', signature }
     if (this.agentOf(butlerId)?.status === 'running') {
       return { wake: false, reason: 'butler-running', signature }
     }
@@ -2078,7 +2162,10 @@ export class SuperagentService {
           `有一个${blocker.kind === 'approval' ? '审批' : blocker.kind === 'decision' ? '决策' : '故障'}需要你处理，不是用户的新指令：`,
           `- ${blocker.summary}`,
           `- 需要你：${blocker.neededAction}`,
-          '先看 butler_inbox 确认状态，再按用户既有授权决定要不要处理；不要为了回应这条而重复播报。',
+          '处理要求（硬性）：先看 butler_inbox 确认状态，再按用户既有授权决定要不要处理；',
+          '**处理完必须给用户发至少一条可见消息**，用一句话说清「哪个会话的什么事、你做了什么/在等什么」。',
+          '确实无事可报时也必须发最短状态（例：「XX 在等审批，已按既有授权放行」）。',
+          '只查 inbox / 只放行、一句话不说，会被记为缺陷（wake_silent）。',
         ].join('\n'),
       )
       await this.store.appendAudit({
@@ -2087,8 +2174,17 @@ export class SuperagentService {
         action: 'wake',
         blockerId: blocker.id,
         by: 'butler-auto',
-        note: `${blocker.kind} 真唤醒（${woke ? '已送达' : '投递失败，已落盘签名'}）：${blocker.summary}`,
+        note: `${blocker.kind} 真唤醒 → ${String(wake.butlerId).slice(0, 20)}（${woke ? '已送达' : '投递失败，已落盘签名'}）：${blocker.summary}`,
       })
+      if (woke) {
+        // I-37：唤醒后必须开口——登记，turn 结束时检查
+        this.wakeWatch.set(String(wake.butlerId), {
+          at: now(),
+          kind: blocker.kind,
+          id: blocker.id,
+          spoke: false,
+        })
+      }
       if (!woke) {
         // 真唤醒没送出去 → 退回注入/队列，保证内容不丢
         await this.injectButlerNotice({

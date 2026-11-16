@@ -71,6 +71,7 @@
 | I-34 | 提醒送达无持久化，管家离线即丢且同签名不重发 | ✅ 已修复 | P0 |
 | I-35 | 计划 scope 绝对路径与匹配相对路径错位，计划内写入被误判计划外 | ✅ 已修复 | P1 |
 | I-36 | 管家回答阻塞中的提问是假成功（answer 用了只对 continued 有效的 API） | ✅ 已修复 | P1 |
+| I-37 | 审批提醒/真唤醒发给派发者而非当前活跃管家，用户看不到 | ✅ 已修复 | P0 |
 | I-24 | Claude 的 running 是推断值 | 🚫 不修 / 已知限制 | P2 |
 | I-25 | Codex 无法区分 root / 子会话 | 🚫 不修 / 已知限制 | P2 |
 | I-26 | 外部来源只读 | 🚫 不修 / 已知限制 | P2 |
@@ -96,6 +97,13 @@
   **硬约束**：判权结果必须落审计并带理由，`allow` 要可枚举可回放；**不允许「判断不出来就默认放行」**（那是把风险从审批转移成静默）。
 - **备注**：与 I-30、I-31 同源但**问的是三件不同的事**——I-30 问「审批看不看得见、该谁批」，I-31 问「每步都批导致自动化验证跑不完」，本条问「**审批链上没有主动方**：worker 不报、管家不问、用户不知」。与 I-31 叠加时后果最严重：一条自动化任务可以无限期停摆而无人知晓（本次 14 小时实例）。优先级 **P0**：不是体验问题，是「任务卡死且无人发现」的可靠性缺口。2026-11-13 记录。
 
+
+**补充（2026-11-16）：真唤醒已生效，但"投错对象"→ 见新条 I-37**
+
+今天实测：`meta.codeVersion = v0.3.2-4-g294bd8e`（HEAD），进程 2026-11-16T07:21:22Z 启动——**新代码已生效**，今天有 9 次带 blocker 的真唤醒（2 条 approval、其余 decision）。但 baidu worker 的派发者是 `session-caac7193…`，而用户当前在 `session-6385aa8d…`，提醒/唤醒全部发给了前者 → 用户仍然「什么都看不到」。
+
+因此本条 (1)(3) 的**机制**已通，缺的是**目标选择与用户侧兜底**，已单列为 I-37（新维度：投给了不在线的派发者 + 跳过不可观测 + 唤醒文案压制开口）。本条剩余 (2) LLM 代审仍未做。
+
 ### I-36 管家回答「阻塞中的提问」是假成功：answer 走了只对 continued 提问有效的宿主 API，返回 ok 但 worker 收不到
 - **状态**：✅ 已修复（含已知限制：插件无法事后认领「不持有句柄的 open 提问」，只能引导到界面回答）
 - **现象**：baidu 项目的专职 git worker（新会话 `session-377c0892-7a3b-4a90-9f72-7e1acaf0aede`，派发 `dsp_eaf9bd11ff8f4ec8`）用 `ask_user_question` 问「后端 `.gitignore` 有已跟踪修改，要不要一起提交？」并给出两个选项 → 产生 question 类卡点 `blk_969cea1fd81b4bc2`（callId `call_01_2fpf9zxrx19fbitdi6cdtwga`），会话进入 `hardStatus=awaiting_answer`。管家先后对 decision 类卡点 `blk_c628567e06aa4a76` 与这个 question 类卡点各调一次 `butler_resolve action=answer`，**两次都返回「已回答/已转发」，但 worker 从未收到**：会话一直停在 `awaiting_answer`，`queuedCount` 持续 1~2，最后只能由用户手动回答才解开。
@@ -109,6 +117,28 @@
   5. 顺带说明：`answerQuestionByCall` 的 `questionWaiters` 分支只覆盖插件自己接管的两处提问登记（`src/service.ts:2648` / `2679`，原生计划模式），**宿主 `ask_user_question` 永远走不到那条分支**，注释要写清。
 - **备注**：根因一句话——**用了只对 `continued` 有效的 API 去回答仍 `open` 的提问，并且忽略了它返回的 `false`**。关键证据：宿主 `answer()` 只从 `continued(agent)` 里找 callId（`dsh-user-questions/lib/index.js:544-562`），`continued()` 只取 `state === 'continued'` 的提问；open 提问的真实应答方是 `user-questions/request` waterfall（`index.js:709`），由 UI 注册（`client.js:2277`）。另外 `ANSWERABLE_KINDS` 含 `question`（`src/blockers.ts:374`）——**协议允许「回答」按钮，但通道根本不通**，属于「渲了按钮却不可能生效」。decision 类卡点走 `forwardToSession`（`src/service.ts:3717`）发普通消息，那是「下一轮读到」的既有语义，与本缺陷无关；`awaiting_answer` 时队列里的消息也解释了 `queuedCount` 为什么是 1~2。
   **归属判定**：新缺陷，不是 I-32 / I-34 的延伸——那两条是「提醒 → 管家」方向（可达性、主动方），本条是反方向「管家 → worker 的提问应答通道」。2026-11-16 记录（只读调查，未改代码）。
+
+### I-37 审批提醒/真唤醒发给了「派发者管家」而不是「当前活跃管家」→ 用户在另一个管家会话里完全看不到
+- **状态**：✅ 已修复（含残留项：允许失败回退与「唤醒后必须开口」的硬检测见实现记录）
+- **现象**：用户原话（2026-11-16）：「我希望这种审批不光能通过白名单来解决，首先要解决的是**看得见的**问题。在 work 侧有需要审批的请求，但是我在 superagent 侧没有收到任何的反馈。」实测：baidu 项目今天产生 14 条 approval 类卡点（`mvn test`/`build.sh` 读 `~/.m2`、`mcp__chrome-devtools-mcp__new_page`/`evaluate_script`/`navigate_page`/`close_page` 等），受影响 worker 会话 `session-2fd87169-5f55-4276-a33b-31bd125b452f`、`session-13b291a3-5f3b-44dd-bd00-109028ffbc09`。**这 14 条全部有 `remind` 审计（提醒确实产生了）**，但用户侧看不到任何反馈。
+- **根因（一句话）**：提醒与真唤醒都只发给**派发这条任务的管家**（`dispatch.fromButlerSessionId`），而用户此刻在**另一个**管家会话里；这条链上没有任何一步会把消息改投/顶到「当前活跃管家」或「UI 眼前」，于是提醒进了冷管家的持久化队列、唤醒投给了一个没人看的会话。
+- **修复方法**：
+  1. **目标选择改成「在线的优先」（核心）**：`injectButlerNotice()`（`src/service.ts:895` 附近）与 `shouldWakeForBlocker()`（`src/service.ts` 的 blockerWake 判定）在决定接收者时按序回退：
+     `dispatch.fromButlerSessionId`（且 `agentOf(id)` 存在）→ 当前活跃管家（`meta.butlerSessionId` 且 agent 存在）→ 其它任一在线管家（`butlerSessionIds()` 里 `agentOf` 非空的）→ 全都不在线才进队列。
+     现在的做法是「派发者优先，不在线就入队」，这是本条的直接成因。
+  2. **唤醒前先验证目标在线**：`wakeSession()` 之前加 `if (!this.agentOf(target)) 不投`——现在会把 `prompt` 发给一个没有 agent 的会话，等于**凭空拉起一个用户看不见的管家会话**，别处再怎么修都白费。
+  3. **唤醒后必须开口**：当前唤醒 prompt 里写着「不要为了回应这条而重复播报」，等于**明示管家别说话**。改成硬要求：处理完必须用一句话告诉用户「刚才哪个 worker 的什么审批、你做了什么/在等什么」；并把目标管家 id 写进 `wake` 审计。
+  4. **跳过要可观测**：`shouldWakeForBlocker()` 返回 `running` / `quota` / `throttled` / `butler-self` 时**现在完全静默**（今天没有任何 `wake_skipped` 审计），排查时无从判断「是没生成、还是被闸掉」。加审计 `wake_skipped`（带 reason），至少按天汇总。
+  5. **UI 兜底（不依赖管家）**：审批类 blocker 应做到「在任何会话都能看见」——侧栏徽标计数（现在徽标只反映当前渲染态）、面板「明细」把审批置顶；可选在 **worker 会话**也渲染一条只读提示（避免用户以为是 worker 卡死）。
+  6. **白名单只减量、不替代可见性**：`mvn test`/`build.sh` 读 `~/.m2` 这类可预判的，进 `approvalPolicy` 自动放行；但 MCP、未知工具、跨仓库写入仍必须靠「看得见 + 能拍板」。
+- **备注**：**先纠正任务里的一个前提**——当前 dsh web 跑的**不是旧代码**：`meta.codeVersion = v0.3.2-4-g294bd8e`、`meta.startedAt = 2026-11-16T07:21:22Z`（本地 15:21），即 HEAD `294bd8e`（含 I-36/真唤醒/改投），进程是**重启过的新版本**。所以本轮现象不能归因于「旧代码未生效」。
+  今天实测的三条通道：
+  - **A 注入**：14/14 都有 `remind` 审计 → 生成正常；但目标是派发者，不在线时进 `meta.pendingNotices`（现积压 **52 条 / 10 个目标管家**，其中 2 条是审批，目标 `session-caac7193…`）。
+  - **B 唤醒**：今天 9 次「带 blocker 的真唤醒」全部 `by=butler-auto`、文案「已送达」，其中只有 **2 条是 approval**（`blk_1fd5074b1b2b4231` 06:04 bash、`blk_21648f38537743cc` 07:03 `new_page`）；其余 12 条审批只有 `remind`。未唤醒的原因不可观测（见修复方法 4），但从时间看多数落在「管家正在 running」的窗口内。
+  - **C 快照**：审批 blocker **确实在** `blockerNotices` 里（无 kind 过滤），但 `NoticeDock` 只在**管家会话且 `sessionId === butler.sessionId`** 时渲染（`src/client/index.ts:1536`），用户在 worker 会话或另一个管家会话时看不到；面板「明细」要手动打开。
+  - **D 用户可见卡片**：只有「管家会话 + 有 turn 跑过 + 注入被 pre-step 取走」三者同时成立才会出现卡片；本轮多数不满足。
+  **归属**：新增本条而不是并入 I-32——I-32 是「链上缺主动方」（已做 (1)(3)），本条是**已做的那部分投错了对象**（目标选择缺陷）+ 跳过不可观测 + 唤醒文案压制开口，属于新维度。与 I-34 的「改投」相邻但不同：I-34 改投的是**离线队列**（落地时要求同 projectKey），本条要的是**实时投递**就直接选在线管家。今天两条派发 `dsp_f365569e6b514876` / `dsp_fbadf96a91aa4a08` 的 `fromButlerSessionId` 分别是 `session-caac7193…` 和 `session-caac7193…`，而 `meta.butlerSessionId = session-6385aa8d…` —— 不是同一个会话，这就是「什么都收不到」的机制。
+  **必须重启 dsh web 才能验证修复**：本轮修复涉及 Host 侧投递目标与唤醒目标，属启动时组装，热改无效。重启前能验证的只有「代码与配置现状」（`/superagent doctor` 看版本）；重启后才能验证「审批出现在当前管家会话 / 唤醒确实发给在线管家 / `wake_skipped` 审计出现」。2026-11-16 记录（只读调查，未改代码）。
 
 > 待新增：发现即记，不要攒着。按上面的四字段模板追加到本节末尾，编号取当前最大 +1，并同步快速索引。
 
@@ -201,6 +231,24 @@
 
 **验证**：单测 4 条（`test/unit/answer.test.ts`）+ 集成 3 条（waiter 路径真送达 / 宿主 false 不假成功且标 UI-only / 落盘+重启后快照标「需到界面回答」并带选项）。
 **反向验证**：① 去掉 `markQuestionNeedsUiAnswer()` 调用 → 2 条用例变红；② 去掉 `rememberPendingQuestion()` 落盘 → 「落盘 + 重启标记」用例变红。均单行改回。
+
+
+**实现记录（2026-11-16，用户批准「两条都做 + 强制开口」）**
+
+1. **目标选择改「在线的优先」**：新增 `resolveButlerTarget(preferred)`（`src/service.ts`），顺序为
+   `派发者（且 agentOf 存在）` → `当前活跃管家 meta.butlerSessionId（且在线）` → `任一在线管家` → 都不在线。
+   - `injectButlerNotice()` 用它选目标；**手动 session 的广播语义保持不变**（乘性发送给所有管家，离线的照旧排队），只改「有派发者但派发者已离线」这一种。
+   - 改投**必须留痕**：写审计 `action:'notify_redirect'`，note 里带「原定 X 不在线（reason）→ 改投 Y」。
+   - 一个管家都不在线时：落回原定目标的队列，并写 `notify_queued` 审计（不再静默）。
+2. **唤醒目标也走同一套解析并必须在线**：`shouldWakeForBlocker()` 用 `resolveButlerTarget` 取目标，
+   `no-online-butler` 时直接不唤醒（避免像以前那样把 `prompt` 发给没有 agent 的冷会话、凭空拉起一个用户看不见的管家）。
+   唤醒审计现在写明**目标管家**：`… 真唤醒 → session-xxxx（已送达）…`。
+3. **唤醒后强制开口**：唤醒 prompt 加了硬要求——处理完必须发至少一条用户可见消息，一句话说清「哪个会话的什么事、做了什么/在等什么」；确实无事可报也必须发最短状态；并明确写了「只查 inbox/只放行不说话会被记为 wake_silent」。
+4. **可检测**：新增 `wakeWatch`（进程内）——唤醒成功时按目标管家登记；该会话内出现**有文本的 `assistant/message`** 视为已开口；`turn/end` 时若从未开口，写审计 `action:'wake_silent'`（`by=butler-auto`，note 带 kind/blockerId）。这就是「唤醒后没可见消息 = 记为缺陷」的可查落点。
+
+**反向验证**：① 同时禁用「活跃管家」与「任一在线」两条回退 → 「改投」与「唤醒目标」两条用例变红；② 把 `wake_silent` 审计写成恒不触发 → 「唤醒后不说话要被抓到」用例变红。均改回。
+
+**残留 / 已知**：`wake_silent` 只在**进程内**检测（`wakeWatch` 不落盘）：如果 dsh 在 turn 结束前重启，这一次静默不会被记账。若要跨重启，需要把它落盘（与 I-34 同类做法），留给后续。
 
 ## 🔧 进行中
 
@@ -523,3 +571,5 @@
 | 2026-11-16 | 新增 I-36：管家回答 `ask_user_question` 的阻塞提问是假成功（`userQuestions.answer()` 只对 continued 有效 + 忽略返回 false + 仍清卡点）。附实例 blk_969cea1fd81b4bc2 / dsp_eaf9bd11ff8f4ec8。清单 34 → 35 条 |
 | 2026-11-16 | I-36 实现：应答按问题 id 组包（answerForQuestions）+ 宿主 answer() 返回 false 时不再假成功（保留卡点、写 answer_question_failed）。纠正上轮「无 answerer」的误记。条目数不变 |
 | 2026-11-16 | I-36 方案 A：待答提问落盘（meta.pendingQuestions）+ 重启后标记「需到界面回答」+ 快照/明细页带正文与选项；已知限制（无法事后认领 open 提问，需上游 API）已写入备注。条目数不变 |
+| 2026-11-16 | 新增 I-37：审批提醒/真唤醒发给「派发者管家」而非「当前活跃管家」（今天 14 条审批全部 remind、仅 2 条 wake，且目标是与用户不同的管家会话）；附「新代码已生效」更正与三条通道实测。清单 35 → 36 条 |
+| 2026-11-16 | I-37 实现：提醒/唤醒目标改为「在线优先」（派发者→活跃管家→任一在线）+ 改投审计 notify_redirect；唤醒 prompt 强制开口；新增 wake_silent 检测（进程内）。条目数不变 |
