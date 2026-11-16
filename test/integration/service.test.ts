@@ -1723,7 +1723,9 @@ test('B watchdog 口径：有会话活动不算停滞，彻底不动才报一次
 // ---------------------------------------------------------------- R1-R5 计划门禁
 
 /** 轮询等待某个条件成立（默认最多 500ms）：用于 `void` 触发的异步收尾。 */
-async function waitFor(predicate: () => boolean, timeoutMs = 500): Promise<boolean> {
+// 默认 2s：这些等待点等的是「异步收尾」（void 触发的 completeDispatch / waiter 登记），
+// 500ms 在机器忙时不够，曾出现偶发红。放宽等待窗口，但**断言本身不放宽**。
+async function waitFor(predicate: () => boolean, timeoutMs = 2000): Promise<boolean> {
   const started = Date.now()
   while (Date.now() - started < timeoutMs) {
     if (predicate()) return true
