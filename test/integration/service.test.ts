@@ -3423,3 +3423,33 @@ test('I-37 2A：对账幂等——审计已写、记录未清时重启不重复�
   )
   assert.equal(harness.service.store.listWakeWatch().length, 0, '两条记录都应清掉')
 })
+
+test('I-37 2A：turn/end 先写审计、再清落盘记录（结算中途重启才补得回来）', async () => {
+  const { harness, cwd } = await boot()
+  const { butlerId } = await withButler(harness, cwd)
+  const service: any = harness.service
+  const store: any = harness.service.store
+
+  service.wakeWatch.set(butlerId, { at: Date.now(), kind: 'approval', id: 'blk_order', spoke: false })
+  await service.persistWakeWatch()
+
+  // 在「写审计的那一瞬间」拍下盘上状态：顺序对的实现里，记录必须还在
+  const seenAtAudit: any[] = []
+  const original = store.appendAudit
+  store.appendAudit = async (entry: any) => {
+    if (entry?.action === 'wake_silent') seenAtAudit.push(...store.listWakeWatch())
+    return original.call(store, entry)
+  }
+
+  try {
+    harness.emit('session/event', { id: butlerId }, { type: 'turn/end', data: { reason: { kind: 'completed' } } })
+    await waitFor(() => store.listAudit().some((item: any) => item.action === 'wake_silent'))
+  } finally {
+    store.appendAudit = original
+  }
+
+  assert.equal(seenAtAudit.length, 1, '写审计时落盘记录必须仍存在（先清后写 = 两步之间重启就漏账）')
+  assert.equal(seenAtAudit[0].blockerId, 'blk_order', '审计要能对上落盘记录，才可能做补记查重')
+  await waitFor(() => store.listWakeWatch().length === 0)
+  assert.equal(store.listWakeWatch().length, 0, '审计写完之后才清记录')
+})
