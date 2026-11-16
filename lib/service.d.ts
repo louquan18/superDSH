@@ -55,6 +55,11 @@ export declare class SuperagentService {
      * 产生过用户可见的助手消息；没有就写 `wake_silent` 审计（可查、可统计）。
      */
     private wakeWatch;
+    /**
+     * 落盘写入串行化：多次 `persistWakeWatch()` 并发时，旧快照不能盖掉新快照
+     * （否则盘上可能永远停在 `spoke:false`，让对账把「已开口」误记成缺陷）。
+     */
+    private wakeWatchWrite;
     private bashReviewer;
     /** 本进程内看到的 `agent-preset/selected`：会话在第一轮前切换 preset 时，header 不会更新。 */
     private selectedPresets;
@@ -260,8 +265,22 @@ export declare class SuperagentService {
     private shouldWakeForBlocker;
     /** 先落盘签名，再发送：签名在，就不会因为发送失败而陷入「醒了没成功→下一轮再醒」的环。 */
     private recordBlockerWake;
-    /** 把内存里的开口监测整份落盘（I-37 2A）。 */
+    /** 内存态监测的落盘形态。 */
+    private snapshotWakeWatch;
+    /**
+     * 把内存里的开口监测整份落盘（I-37 2A）。
+     * 写入串行化，避免旧快照覆盖新快照；返回的 promise 可 await 以确认「已落盘」。
+     */
     private persistWakeWatch;
+    /**
+     * `turn/end` 结算（I-37 2A）：**先写审计、再清落盘记录**。
+     *
+     * 顺序不能反：若先清记录再写审计，正好在这两步之间重启，就变成「记录没了、缺陷也没记」——
+     * 那正是本任务要堵的静默漏账。现在即使在这里挂掉，记录还在盘上，启动对账会补记
+     * （`reconcileWakeWatch` 幂等，审计已写过就只清记录，不会重复记）。
+     * 审计本身写失败时不删记录，留给下次启动再补。
+     */
+    private settleWakeWatch;
     /**
      * 启动对账（I-37 2A）：把「唤醒过但没看到开口」的记录补记成 `wake_silent`。
      *
@@ -269,6 +288,9 @@ export declare class SuperagentService {
      * 能用的信号是会话事件里有没有该时间的 `assistant/message`。能读到就按实际判定；
      * 读不到（来源不支持 / 读取失败）就**宁可补记**，并在 note 里写明是重启补记，
      * 避免「只查不说」因为一次重启就彻底漏账。
+     *
+     * 幂等：`turn/end` 结算可能「审计已写、记录未清」就被重启，这里用
+     * (会话, 卡点, 时间) 查重，避免同一条静默被记两次。
      */
     private reconcileWakeWatch;
     /** 会真正起 turn 的投递（与 inject 相对）。返回是否送出去。 */

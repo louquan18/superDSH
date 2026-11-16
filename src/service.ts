@@ -107,6 +107,14 @@ import { BashReviewer } from './bash-review.js'
 const MANAGED_SOURCE = 'dsh' as const
 const BUTLER_PRESET = 'superagent-butler'
 
+/** 内存态的开口监测条目（落盘形态见 `WakeWatchRecord`）。 */
+interface WakeWatchState {
+  at: number
+  kind: string
+  id: string
+  spoke: boolean
+}
+
 export const WORKER_PROMPT = `You are a worker managed by the SuperAgent butler. The butler is a read-only router; it does not do the work. Report your state at the start, at major milestones, before ending a turn, when blocked, and when you need a user decision, using butler_report_status. Keep the report short and factual.
 
 If you are working on a task dispatched by the butler (marked 【管家派发】) and the project is in plan-review mode, do not edit files or run mutating commands before your plan for this task is approved. Call butler_submit_plan with a complete plan and a structured scope (paths/commands). Then end the turn and wait. The host enforces this: a mutating tool call without an approved plan is denied. Do not try to bypass a denial; submit a plan or ask the butler.
@@ -187,7 +195,12 @@ export class SuperagentService {
    * 唤醒后「必须开口」的监测（I-37）：唤醒时登记，管家 turn 结束时检查这一轮有没有
    * 产生过用户可见的助手消息；没有就写 `wake_silent` 审计（可查、可统计）。
    */
-  private wakeWatch = new Map<string, { at: number; kind: string; id: string; spoke: boolean }>()
+  private wakeWatch = new Map<string, WakeWatchState>()
+  /**
+   * 落盘写入串行化：多次 `persistWakeWatch()` 并发时，旧快照不能盖掉新快照
+   * （否则盘上可能永远停在 `spoke:false`，让对账把「已开口」误记成缺陷）。
+   */
+  private wakeWatchWrite: Promise<void> = Promise.resolve()
   private bashReviewer: BashReviewer
   /** 本进程内看到的 `agent-preset/selected`：会话在第一轮前切换 preset 时，header 不会更新。 */
   private selectedPresets = new Map<string, string>()
@@ -393,21 +406,12 @@ export class SuperagentService {
         const text = extractText(data?.message?.content ?? data?.content)
         if (text.trim().length > 0 && !watch.spoke) {
           watch.spoke = true
-          this.persistWakeWatch()
+          void this.persistWakeWatch()
         }
       }
       if (type === 'turn/end') {
-        this.wakeWatch.delete(id)
-        this.persistWakeWatch()
-        if (!watch.spoke) {
-          void this.store.appendAudit({
-            sessionId: id,
-            kind: 'blocker',
-            action: 'wake_silent',
-            by: 'butler-auto',
-            note: `唤醒后没有任何用户可见消息（${watch.kind} / ${watch.id}）——违反「必须开口」`,
-          })
-        }
+        // 先写审计、再清落盘记录（见 settleWakeWatch 的顺序说明）
+        void this.settleWakeWatch(id, watch)
       }
     }
 
@@ -2141,16 +2145,57 @@ export class SuperagentService {
     this.lastBlockerWakeAt.set(key, now())
   }
 
-  /** 把内存里的开口监测整份落盘（I-37 2A）。 */
-  private persistWakeWatch(): void {
-    const items: WakeWatchRecord[] = [...this.wakeWatch.entries()].map(([butlerSessionId, item]) => ({
+  /** 内存态监测的落盘形态。 */
+  private snapshotWakeWatch(): WakeWatchRecord[] {
+    return [...this.wakeWatch.entries()].map(([butlerSessionId, item]) => ({
       butlerSessionId,
       at: item.at,
       kind: item.kind,
       ...(item.id ? { blockerId: item.id } : {}),
       spoke: item.spoke,
     }))
-    void this.store.saveWakeWatch(items).catch(() => undefined)
+  }
+
+  /**
+   * 把内存里的开口监测整份落盘（I-37 2A）。
+   * 写入串行化，避免旧快照覆盖新快照；返回的 promise 可 await 以确认「已落盘」。
+   */
+  private persistWakeWatch(): Promise<void> {
+    const items = this.snapshotWakeWatch()
+    this.wakeWatchWrite = this.wakeWatchWrite
+      .then(() => this.store.saveWakeWatch(items))
+      .catch(() => undefined)
+    return this.wakeWatchWrite
+  }
+
+  /**
+   * `turn/end` 结算（I-37 2A）：**先写审计、再清落盘记录**。
+   *
+   * 顺序不能反：若先清记录再写审计，正好在这两步之间重启，就变成「记录没了、缺陷也没记」——
+   * 那正是本任务要堵的静默漏账。现在即使在这里挂掉，记录还在盘上，启动对账会补记
+   * （`reconcileWakeWatch` 幂等，审计已写过就只清记录，不会重复记）。
+   * 审计本身写失败时不删记录，留给下次启动再补。
+   */
+  private async settleWakeWatch(sessionId: string, watch: WakeWatchState): Promise<void> {
+    if (!watch.spoke) {
+      try {
+        await this.store.appendAudit({
+          sessionId,
+          kind: 'blocker',
+          action: 'wake_silent',
+          by: 'butler-auto',
+          ...(watch.id ? { blockerId: watch.id } : {}),
+          note: `唤醒后没有任何用户可见消息（${watch.kind} / ${watch.id}）——违反「必须开口」`,
+        })
+      } catch {
+        // 审计没写成功：保留落盘记录，下次启动对账再补记
+        return
+      }
+    }
+    // 期间可能又来了新的唤醒（覆盖了同一会话的记录）：只清自己那一条
+    if (this.wakeWatch.get(sessionId) !== watch) return
+    this.wakeWatch.delete(sessionId)
+    await this.persistWakeWatch()
   }
 
   /**
@@ -2160,10 +2205,15 @@ export class SuperagentService {
    * 能用的信号是会话事件里有没有该时间的 `assistant/message`。能读到就按实际判定；
    * 读不到（来源不支持 / 读取失败）就**宁可补记**，并在 note 里写明是重启补记，
    * 避免「只查不说」因为一次重启就彻底漏账。
+   *
+   * 幂等：`turn/end` 结算可能「审计已写、记录未清」就被重启，这里用
+   * (会话, 卡点, 时间) 查重，避免同一条静默被记两次。
    */
   private async reconcileWakeWatch(): Promise<void> {
     const items = this.store.listWakeWatch()
     if (items.length === 0) return
+    const audits = this.store.listAudit()
+    const remaining: WakeWatchRecord[] = []
     for (const item of items) {
       let spoke = item.spoke === true
       if (!spoke) {
@@ -2182,8 +2232,17 @@ export class SuperagentService {
           spoke = false
         }
       }
-      if (!spoke) {
-        await this.store.appendAudit({
+      if (spoke) continue
+      const alreadyRecorded = audits.some(
+        (entry) =>
+          entry.action === 'wake_silent' &&
+          entry.sessionId === item.butlerSessionId &&
+          String(entry.blockerId ?? '') === String(item.blockerId ?? '') &&
+          Number(entry.at) >= item.at,
+      )
+      if (alreadyRecorded) continue
+      try {
+        const created = await this.store.appendAudit({
           sessionId: item.butlerSessionId,
           kind: 'blocker',
           action: 'wake_silent',
@@ -2191,9 +2250,13 @@ export class SuperagentService {
           ...(item.blockerId ? { blockerId: item.blockerId } : {}),
           note: `唤醒后没有观察到用户可见消息（${item.kind} / ${item.blockerId ?? '-'}）——进程重启补记，未能确知该轮是否开口`,
         })
+        audits.push(created)
+      } catch {
+        // 审计没写成功：记录留在盘上，下次启动再试（宁可多留，不可漏账）
+        remaining.push(item)
       }
     }
-    await this.store.saveWakeWatch([])
+    await this.store.saveWakeWatch(remaining)
   }
 
   /** 会真正起 turn 的投递（与 inject 相对）。返回是否送出去。 */
@@ -2285,7 +2348,8 @@ export class SuperagentService {
           id: blocker.id,
           spoke: false,
         })
-        this.persistWakeWatch()
+        // 等落盘确认再继续：这样「唤醒已发生」这件事在崩溃后仍然可见
+        await this.persistWakeWatch()
       }
       if (!woke) {
         // 真唤醒没送出去 → 退回注入/队列，保证内容不丢

@@ -3331,7 +3331,7 @@ test('I-37 2A：唤醒即落盘；观察到开口会更新；turn 结束未开�
 
   // 唤醒 → 落盘（spoke=false）
   service.wakeWatch.set(butlerId, { at: Date.now(), kind: 'approval', id: 'blk_2a', spoke: false })
-  service.persistWakeWatch()
+  await service.persistWakeWatch()
   await waitFor(() => harness.service.store.listWakeWatch().length === 1)
   const persisted = harness.service.store.listWakeWatch()[0]!
   assert.equal(persisted.butlerSessionId, butlerId)
@@ -3357,7 +3357,7 @@ test('I-37 2A：唤醒即落盘；观察到开口会更新；turn 结束未开�
 
   // 再走一遍：唤醒后直接 turn/end（没开口）→ 记 wake_silent
   service.wakeWatch.set(butlerId, { at: Date.now(), kind: 'decision', id: 'blk_2b', spoke: false })
-  service.persistWakeWatch()
+  await service.persistWakeWatch()
   harness.emit('session/event', { id: butlerId }, { type: 'turn/end', data: { reason: { kind: 'completed' } } })
   await waitFor(() =>
     harness.service.store.listAudit().some((item) => item.action === 'wake_silent'),
@@ -3385,4 +3385,41 @@ test('I-37 2A：进程重启后，未开口的记录会被补记（跨重启不�
   assert.match(String(audits[0]!.note), /进程重启补记/)
   assert.equal(audits[0]!.blockerId, 'blk_restart')
   assert.equal(harness.service.store.listWakeWatch().length, 0, '补记后要清掉落盘记录')
+})
+
+test('I-37 2A：对账幂等——审计已写、记录未清时重启不重复记；已开口的记录不记缺陷', async () => {
+  const { harness, cwd } = await boot()
+  const { butlerId } = await withButler(harness, cwd)
+  const service: any = harness.service
+  const at = Date.now() - 60_000
+
+  // 情形 A：turn/end 的审计已经写成功、但清落盘记录之前进程就重启了
+  await harness.service.store.appendAudit({
+    sessionId: butlerId,
+    kind: 'blocker',
+    action: 'wake_silent',
+    by: 'butler-auto',
+    blockerId: 'blk_dup',
+    at: at + 1,
+    note: '唤醒后没有任何用户可见消息（approval / blk_dup）——违反「必须开口」',
+  })
+  // 情形 B：已经观察到开口（spoke:true），但没走完结算就重启了
+  await harness.service.store.saveWakeWatch([
+    { butlerSessionId: butlerId, at, kind: 'approval', blockerId: 'blk_dup', spoke: false },
+    { butlerSessionId: butlerId, at, kind: 'decision', blockerId: 'blk_spoke', spoke: true },
+  ])
+
+  await service.reconcileWakeWatch()
+  const audits = harness.service.store.listAudit().filter((item) => item.action === 'wake_silent')
+  assert.equal(
+    audits.filter((item) => item.blockerId === 'blk_dup').length,
+    1,
+    '同一条静默不能记两次（先审计后清记录，中间重启要幂等）',
+  )
+  assert.equal(
+    audits.filter((item) => item.blockerId === 'blk_spoke').length,
+    0,
+    '已开口不应记缺陷',
+  )
+  assert.equal(harness.service.store.listWakeWatch().length, 0, '两条记录都应清掉')
 })
