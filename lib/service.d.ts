@@ -301,6 +301,7 @@ export declare class SuperagentService {
     answerQuestionByCall(callId: string, answer: any, by?: 'user' | 'butler-chat'): Promise<{
         ok: boolean;
         message: string;
+        reason?: string;
     }>;
     private resolveAgentFor;
     private resolveBlockersBy;
@@ -364,3 +365,17 @@ export declare class SuperagentService {
     private scan;
     private recover;
 }
+/**
+ * 把管家的一句话回答，转成宿主 `ask_user_question` 认识的**结构化应答批次**。
+ *
+ * 关键点（I-36）：`answer` 的 `id` 必须是**问题自己的 id**（模型靠它对应问题），
+ * 以前写死成 `id:'answer'` 会让模型看到一个对不上号的答复。
+ * 另外：文本正好等于某个选项标签时放进 `selected`（模型和 UI 都更好处理），
+ * 否则放进 `custom`；多问题时只答第一个，其余显式留空（宿主语义 = 跳过）。
+ */
+export declare function answerForQuestions(questions: Array<{
+    id?: unknown;
+    options?: Array<{
+        label?: unknown;
+    }>;
+}> | undefined, text: string): any;

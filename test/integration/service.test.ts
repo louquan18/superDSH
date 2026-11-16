@@ -3035,3 +3035,81 @@ test('I-34 补：目标管家还活着时按原键投递（不改行为）', asy
   assert.equal((butler.injected as any[]).length, 1, '原键要照常投递')
   assert.equal(service.pendingButlerNotices.get(butlerId), undefined)
 })
+
+// ---------------------------------------------------------------- I-36 提问应答通道
+
+test('I-36：插件持有 waiter 时，管家回答能真正送到提问（按问题 id 组包）', async () => {
+  const { harness, cwd } = await boot()
+  await withButler(harness, cwd)
+  harness.addAgent('worker-q1', cwd)
+  const agent = harness.agents.get('worker-q1')
+  const callId = 'call_q1'
+
+  // 模拟 worker 的 ask_user_question 落到插件 answerer（插件会持有这个 promise）
+  const pending = (harness.service as any).answerQuestion(
+    agent,
+    {
+      wait: { callId },
+      questions: [
+        {
+          id: 'q1',
+          question: '后端 .gitignore 有已跟踪修改，要不要一起提交？',
+          options: [{ label: '不提交' }, { label: '一起提交' }],
+        },
+      ],
+    },
+    () => 'next',
+  )
+
+  // answerQuestion 里先 await ensureRuntime 再登记 waiter，这里等一下（线上是秒级之后才回答）
+  await waitFor(() => (harness.service as any).questionWaiters.has(callId))
+
+  const result = await harness.service.answerQuestionByCall(callId, '一起提交', 'butler-chat')
+  assert.equal(result.ok, true, `应答应成功：${JSON.stringify(result)}`)
+
+  const answer = await pending
+  assert.equal(answer.answers[0].id, 'q1', 'id 必须是问题自己的 id，不能是写死的 answer')
+  assert.deepEqual(answer.answers[0].selected, ['一起提交'])
+})
+
+test('I-36：宿主 answer() 返回 false（不是 continued）时不许报成功，也不许清卡点', async () => {
+  const { harness, cwd } = await boot()
+  await withButler(harness, cwd)
+  harness.addAgent('worker-q2', cwd)
+  // 宿主对「仍在 open 的提问」会 return false（不抛错）
+  harness.ctx.userQuestions.answer = async () => false
+  await harness.service.store.putBlocker({
+    id: 'blk_q_fail',
+    sessionId: 'worker-q2',
+    kind: 'question',
+    severity: 'warning',
+    status: 'notified',
+    signature: 'question:call_fail_1',
+    summary: '要不要一起提交？',
+    neededAction: '回答这个提问',
+    evidence: { questions: [{ id: 'q1', question: '要不要一起提交？', options: [{ label: '一起提交' }] }] },
+    detectedAt: Date.now(),
+    lastSeenAt: Date.now(),
+    reminderCount: 1,
+    relatedCallId: 'call_fail_1',
+  } as any)
+
+  const out = await harness.service.resolveBlocker(
+    'blk_q_fail',
+    'answer',
+    '一起提交',
+    'butler-chat',
+  )
+  assert.equal(out.ok, false, '不能假成功')
+  assert.equal(out.reason, 'question_not_pending')
+  assert.match(String(out.message), /界面/, '要给可执行的下一步')
+  assert.equal(
+    harness.service.store.getBlocker('blk_q_fail')!.status,
+    'notified',
+    '卡点不能被标成已处理（那正是旧的假成功）',
+  )
+  assert.ok(
+    harness.service.store.listAudit().some((item) => item.action === 'answer_question_failed'),
+    '失败要留审计',
+  )
+})

@@ -70,6 +70,7 @@
 | I-33 | 计划只能去侧栏明细看，对话里无法审批 | ✅ 已修复 | P1 |
 | I-34 | 提醒送达无持久化，管家离线即丢且同签名不重发 | ✅ 已修复 | P0 |
 | I-35 | 计划 scope 绝对路径与匹配相对路径错位，计划内写入被误判计划外 | ✅ 已修复 | P1 |
+| I-36 | 管家回答阻塞中的提问是假成功（answer 用了只对 continued 有效的 API） | 🔧 进行中 | P1 |
 | I-24 | Claude 的 running 是推断值 | 🚫 不修 / 已知限制 | P2 |
 | I-25 | Codex 无法区分 root / 子会话 | 🚫 不修 / 已知限制 | P2 |
 | I-26 | 外部来源只读 | 🚫 不修 / 已知限制 | P2 |
@@ -94,6 +95,20 @@
   (3) **人决策且由管家主动开口**：升级的由管家**主动**发消息给用户（原因 / 需要你决策什么 / 建议决策含理由 / 备选与后果 / 按钮），带 dispatchId 级去重与冷却，避免同一审批反复骚扰。
   **硬约束**：判权结果必须落审计并带理由，`allow` 要可枚举可回放；**不允许「判断不出来就默认放行」**（那是把风险从审批转移成静默）。
 - **备注**：与 I-30、I-31 同源但**问的是三件不同的事**——I-30 问「审批看不看得见、该谁批」，I-31 问「每步都批导致自动化验证跑不完」，本条问「**审批链上没有主动方**：worker 不报、管家不问、用户不知」。与 I-31 叠加时后果最严重：一条自动化任务可以无限期停摆而无人知晓（本次 14 小时实例）。优先级 **P0**：不是体验问题，是「任务卡死且无人发现」的可靠性缺口。2026-11-13 记录。
+
+### I-36 管家回答「阻塞中的提问」是假成功：answer 走了只对 continued 提问有效的宿主 API，返回 ok 但 worker 收不到
+- **状态**：🔧 进行中（假成功已消除、应答组包已修正；「插件未持有提问时如何接管」仍未解，见备注）
+- **现象**：baidu 项目的专职 git worker（新会话 `session-377c0892-7a3b-4a90-9f72-7e1acaf0aede`，派发 `dsp_eaf9bd11ff8f4ec8`）用 `ask_user_question` 问「后端 `.gitignore` 有已跟踪修改，要不要一起提交？」并给出两个选项 → 产生 question 类卡点 `blk_969cea1fd81b4bc2`（callId `call_01_2fpf9zxrx19fbitdi6cdtwga`），会话进入 `hardStatus=awaiting_answer`。管家先后对 decision 类卡点 `blk_c628567e06aa4a76` 与这个 question 类卡点各调一次 `butler_resolve action=answer`，**两次都返回「已回答/已转发」，但 worker 从未收到**：会话一直停在 `awaiting_answer`，`queuedCount` 持续 1~2，最后只能由用户手动回答才解开。
+- **修复方法**：
+  1. **按提问状态分流（根因修复）**：`answerQuestionByCall`（`src/service.ts:2707`）现在不区分状态地调 `ctx.userQuestions.answer()`（`2744`）。必须改成：
+     - `continued`（超时后转为后续轮次的提问）→ 才允许用 `userQuestions.answer()`（它内部是 `agent.steer()` 注入一条 `user-question-reply` 消息）；
+     - `open`（正阻塞 tool call 的提问）→ **不能用 answer()**，必须走 Agent-scoped `user-questions/request` waterfall 的 answerer（宿主 `ask()` 就靠这个 waterfall 等人工回答，见 `dsh-user-questions/lib/index.js:709`；注册 answerer 的先例是 UI 的 `dsh-client-ui-user-questions/lib/client.js:2277`）。插件已 `inject: ['userQuestions']`（`src/index.ts:25`），但**目前没有注册任何提问 answerer**（全仓 `waterfall` 零命中）。
+  2. **失败必须可观测（最坏情形就是现在这样）**：`answer()` 返回 `boolean`（是否仍处于 continued），宿主实现里找不到 callId 时**直接 `return false` 不抛错**（`dsh-user-questions/lib/index.js:562`）。插件忽略了这个返回值，紧接着还执行 `resolveBlockersBy(..., '问题已回答')`（`2745-2748`）——于是**卡点被标成已处理**，用户看到「已回答」，worker 却什么都没收到。改为：返回 `false` 时返回 `{ ok:false, reason:'question_not_continued', hint:'该提问仍在前台等待，请在界面上回答或先取消提问' }`，写审计 `answer_question_failed`，且**不要**清卡点。
+  3. **不要用普通消息兜底**：`awaiting_answer` 期间 turn 阻塞在 tool call 上，`source.prompt`（`mode:'queue'`）只会排进下一轮，**本轮不结束永远不会被消费**；可以留一条记录，但不能算作应答。
+  4. **短期兜底**：在 (1) 的 waterfall 接入完成前，question 类卡点的「回答」应改为「到界面回答」或「取消提问」，避免再次假成功。
+  5. 顺带说明：`answerQuestionByCall` 的 `questionWaiters` 分支只覆盖插件自己接管的两处提问登记（`src/service.ts:2648` / `2679`，原生计划模式），**宿主 `ask_user_question` 永远走不到那条分支**，注释要写清。
+- **备注**：根因一句话——**用了只对 `continued` 有效的 API 去回答仍 `open` 的提问，并且忽略了它返回的 `false`**。关键证据：宿主 `answer()` 只从 `continued(agent)` 里找 callId（`dsh-user-questions/lib/index.js:544-562`），`continued()` 只取 `state === 'continued'` 的提问；open 提问的真实应答方是 `user-questions/request` waterfall（`index.js:709`），由 UI 注册（`client.js:2277`）。另外 `ANSWERABLE_KINDS` 含 `question`（`src/blockers.ts:374`）——**协议允许「回答」按钮，但通道根本不通**，属于「渲了按钮却不可能生效」。decision 类卡点走 `forwardToSession`（`src/service.ts:3717`）发普通消息，那是「下一轮读到」的既有语义，与本缺陷无关；`awaiting_answer` 时队列里的消息也解释了 `queuedCount` 为什么是 1~2。
+  **归属判定**：新缺陷，不是 I-32 / I-34 的延伸——那两条是「提醒 → 管家」方向（可达性、主动方），本条是反方向「管家 → worker 的提问应答通道」。2026-11-16 记录（只读调查，未改代码）。
 
 > 待新增：发现即记，不要攒着。按上面的四字段模板追加到本节末尾，编号取当前最大 +1，并同步快速索引。
 
@@ -140,6 +155,31 @@
 - **未做**：第 (2) 项 LLM 代审（把命令原文交模型判 allow/deny/escalate）——按用户要求本轮不做。
 - **验证**：集成 5 条（approval 真唤醒且不重复 inject / 仅三类唤醒、stall 仍走注入 / 同签名第二次不再唤醒 / 每派发最多 3 次 / running 时不打断）。既有「结构化 source」用例改为显式关掉真唤醒以继续覆盖注入通道。
   **反向验证**：去掉类型闸（任何卡点都唤醒）→ 「只对三类唤醒」用例变红，单行改回。
+
+
+**实现记录（2026-11-16，用户选方案 1）**
+
+先说一处**上一轮记录的纠正**：原文写「插件目前没有注册任何提问 answerer」是**错的**——`installWorker` 里其实注册了 `agent.ctx.on('user-questions/request', … answerQuestion …, { prepend: true })`（`src/service.ts:565-570`），并且 `answerQuestion` 会为 root worker 持有 waiter（`src/service.ts:2648` / `2679`）。当时的 grep 只搜了 `waterfall` / `answerer`，漏了事件名，特此更正。
+
+**已修（本轮）**
+
+1. **应答组包修正**：新增 `answerForQuestions()`（`src/service.ts`，已导出），把管家的一句话装成宿主认识的结构化批次：
+   - `id` 用**问题自己的 id**（以前写死 `id:'answer'`，模型拿到的答复对不上任何问题）；
+   - 文本恰好等于某个选项标签 → 放进 `selected`；否则放进 `custom`；
+   - 多问题时只答第一个，其余 `selected: []`（宿主语义 = 跳过）。
+   `resolveBlocker` 的 question 分支改为传**原始文本**（`src/service.ts:3674`），由 `answerQuestionByCall` 统一按问题 id 组包（waiter 路径用 `runtime.questions` 里的问题，宿主路径用 `blocker.evidence.questions`）。
+2. **消除假成功（最坏情形）**：`ctx.userQuestions.answer()` 的返回值是 `boolean`，对非 `continued` 的提问**返回 `false` 而不抛错**。现在显式判断：`false` → 返回 `{ ok:false, reason:'question_not_pending', message:'…请在界面上直接回答，或先取消这个提问' }`，写审计 `answer_question_failed`，并且**不再执行 `resolveBlockersBy(...,'问题已回答')`**——卡点保持未处理，不会再出现「显示已回答、worker 没收到」。
+3. **实测证据（本次实例）**：`audit` 里该 callId 的记录是 `action=answer_question, by=butler-chat, sessionId=session-377c0892…`——**带 sessionId** 说明当时走的是「宿主 API 分支」，也就是 **waiter 不在**（占据 waiter 的分支打审计不带 sessionId）。因此本次不是「组包错」，而是「插件当时没有持有这个提问」，`answer()` 又静默返回 false。
+
+**仍未解（下一步）**
+
+- **插件未持有时如何接管**：`answer()` 只覆盖 `continued`；仍 `open` 的提问只能由注册时的 answerer 在 `ask()` 期间 resolve。插件**错过后无法加入**（宿主没有「事后认领 open 提问」的 API）。最可能的成因是**进程重启丢失内存里的 waiter**（与 I-34 同类的「内存态」问题）。可选下一步：
+  (a) 把「待答提问」落盘（callId + sessionId + 问题），重启后若对应 blocker 仍在，把卡点直接标成「到界面回答」而不是装作可代答；
+  (b) 请宿主提供「事后认领/答复 open 提问」的 API（需上游支持，插件侧无法自解）。
+- 在 (a)/(b) 落地前，行为是：**能答的（waiter 在）真的会送达；不能答的立刻明确报错并给出路**，不再假成功。
+
+**验证**：单测 4 条（`test/unit/answer.test.ts`：命中选项 / 自由文本 / 多问题 / 无问题兜底）+ 集成 2 条（waiter 路径按问题 id 真送达；宿主返回 false 时不假成功、不清卡点、留审计）。
+**反向验证**：① 把 `id` 改回写死的 `'answer'` → 4 条用例变红；② 把 `if (accepted === false)` 去掉（忽略返回值）→ 「不许假成功」用例变红。两处均单行改回。
 
 ## 🔧 进行中
 
@@ -459,3 +499,5 @@
 | 2026-11-13 | I-32 补充真机复核：审批提醒走 `agent.inject`（契约明文「不唤醒」）+ 唤醒通道只接进度事件 → 管家对审批零感知。附三条实例与 reminderCount 证据。不新开条目，仍 34 条 |
 | 2026-11-13 | 补充 I-34 复现实例：plan_22a5239a3b424bd8 / blk_a9e563baf754409e 的提醒在 pendingNotices 第 29 条**落盘但从未被消费** → 断点是「没人 flush」（按目标管家 id 分区 + 无兜底 flush），并写入修复方法补充。条目数不变 |
 | 2026-11-16 | I-34 补：改投三约束（同项目才改投/目标还活着按原键/不丢且快照可见）；I-32 部分完成（(1)(3) 真唤醒已做，(2) LLM 代审未做）。条目数不变 |
+| 2026-11-16 | 新增 I-36：管家回答 `ask_user_question` 的阻塞提问是假成功（`userQuestions.answer()` 只对 continued 有效 + 忽略返回 false + 仍清卡点）。附实例 blk_969cea1fd81b4bc2 / dsp_eaf9bd11ff8f4ec8。清单 34 → 35 条 |
+| 2026-11-16 | I-36 实现：应答按问题 id 组包（answerForQuestions）+ 宿主 answer() 返回 false 时不再假成功（保留卡点、写 answer_question_failed）。纠正上轮「无 answerer」的误记。条目数不变 |

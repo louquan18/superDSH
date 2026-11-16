@@ -323,6 +323,18 @@ policy:
 
 > shadow 期间**不推进 `reminderCount` 配额**，但会推进节流时间——否则每轮扫描都会刷一条审计。审计里能看到 `shadow: true` 和「本会提醒……」的原因。
 
+## 提问应答通道（I-36）
+
+管家代答 `ask_user_question`（worker 阻塞提问）时，行为是这样的：
+
+- **插件持有该提问时**（正常路径：worker 提问 → 插件的 `user-questions/request` answerer 持有 waiter → 卡点进收件箱）：管家的回答会**真正 resolve 回那个 tool call**，并且按**问题自己的 id** 组包（文本命中选项时放 `selected`，否则放 `custom`），不再是写死的 `id:"answer"`。
+- **插件没持有时**（例如进程重启丢了内存里的 waiter）：宿主的 `userQuestions.answer()` 只对 `continued`（超时转后续轮次）的提问有效，对仍 `open` 的会**返回 `false` 且不抛错**。现在这种返回会被显式判失败：
+  - `butler_resolve` 返回 `{ok:false, reason:"question_not_pending"}`，提示「在界面上直接回答，或先取消提问」；
+  - **不再**把卡点标成「已处理」（这是之前的假成功）；
+  - 审计写 `answer_question_failed`。
+
+> 仍待补：插件「错过后认领 open 提问」需要宿主支持（没有事后认领 API），或把待答提问落盘、重启后把卡点直接标成「到界面回答」。详见问题清单 I-36。
+
 ## `/superagent doctor`（只读自检，I-22）
 
 为了「看一眼配置到底生效没有」而去改 `~/.dsh`，历史上把 turn 挂起过几次。所以加了一条纯只读命令：
